@@ -55,10 +55,9 @@ const MIME = {
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
-  'x-frame-options': 'SAMEORIGIN',
   'permissions-policy': 'microphone=(self)',
   'content-security-policy':
-    "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'",
+    "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self' https://zxlumen.cn",
 }
 
 function serveStatic(req, res, pathname) {
