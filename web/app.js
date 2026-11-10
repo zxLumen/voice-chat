@@ -50,7 +50,13 @@ const speech = { zhVoices: [] }
 
 function loadSettings() {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')
+    // v0.2 迁移：老版本存过设置但没有 bargeIn 字段 → 把他带进免提（只发生一次）
+    if (saved && typeof saved === 'object' && !('bargeIn' in saved)) {
+      saved.autoListen = true
+      saved.bargeIn = true
+    }
+    return { ...DEFAULTS, ...saved }
   } catch {
     return { ...DEFAULTS }
   }
