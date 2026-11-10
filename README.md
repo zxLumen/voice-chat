@@ -105,7 +105,7 @@ docker compose up -d voice && docker compose exec caddy caddy reload -c /etc/cad
 - 没有流式 ASR：必须等一句说完（静音 0.65s）才知道说了什么。
 - 语音合成按句整段返回，不是边生成边播；上游抖动时单句可能 3~7s。
 - 外放时扬声器回声仍可能误触发打断（AEC 只能压一部分）；建议戴耳机，或在设置里关掉「开口即打断」。
-- 实时信息（天气/股价/新闻）没有联网工具，模型会直说不知道。
+- 实时信息（天气/股价/新闻）没有联网工具，模型会直说不知道；日期/星期/时间由 system prompt 注入北京时间，可以直接回答。
 - TTS 走主站网关 `/audio/speech`（`VOICE_TTS_MODE=gateway` + `VOICE_TTS_TOKEN`），
   SiliconFlow 密钥只在主站 `.env`；`direct` 只留给本地调试。
 - 没有服务端会话存储：换设备/清缓存，对话就没了（有意为之）。
