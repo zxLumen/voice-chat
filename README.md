@@ -23,7 +23,7 @@
   MediaRecorder(webm/opus 或 mp4/aac)
     → POST /api/asr（原始音频体，12MB 上限；最近 6 轮对话放 x-suikou-ctx 供纠错）
       → ffmpeg 16k 单声道 mp3
-      → AI 网关 /audio/transcriptions（SiliconFlow XingChenASR）
+      → AI 网关 /audio/transcriptions（SiliconFlow Qwen3-ASR-1.7B，之后过一遍上下文润色）
       → 可选：中英混说/长句走一次 LLM 润色（≤2s，失败回退原文）
     → POST /api/chat（SSE）
       → AI 网关 /chat/completions（deepseek-v4.1-flash，reasoning_effort=none）
@@ -40,7 +40,7 @@
 
 | 环节 | 耗时 |
 | --- | --- |
-| 转写（XingChenASR，3~5s 语音） | 0.46 ~ 0.98s（短句不润色） |
+| 转写（Qwen3-ASR，9s 语音） | 0.74 ~ 0.92s（短句不润色；43 字句 + 润色 582ms） |
 | 润色（仅中英混说 / ≥24 字） | 1.2 ~ 1.6s，超 2s 回退原文 |
 | 首个 token | 1.2 ~ 1.5s（deepseek-v4.1-flash） |
 | 首句合成 | 1.2 ~ 2.5s（CosyVoice2，首句 ≤12 字、按逗号断） |

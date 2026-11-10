@@ -170,9 +170,10 @@ async function handleAsr(req, res) {
     // 上下文纠错：前端把最近几轮对话塞在 x-suikou-ctx（base64url JSON）里，
     // 让后处理知道「对位」「StockApp」这些词，别把专名听成同音字。
     const t1 = Date.now()
-    const p = await polishTranscript({ text: r.text, history: readCtx(req) })
+    const history = readCtx(req)
+    const p = await polishTranscript({ text: r.text, history })
     console.log(
-      `[asr] raw=${r.text.length}字 → ${p.polished ? '润色' : '原文'} ${p.text.length}字 asr=${r.ms}ms polish=${Date.now() - t1}ms`,
+      `[asr] raw=${r.text.length}字 → ${p.polished ? '润色' : '原文'} ${p.text.length}字 ctx=${history.length} asr=${r.ms}ms polish=${Date.now() - t1}ms`,
     )
     return json(res, 200, {
       text: p.text,
