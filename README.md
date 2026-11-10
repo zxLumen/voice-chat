@@ -12,7 +12,7 @@
 - **流式回复**：模型边生成边显示，按句合成语音；第一句先出声，后面的句子边播边预取。
 - **可打断**：说话中再点一下圆球，立即停播并开始听。
 - **两种输入**：语音为主，底部随时可以打字；文字回复默认不朗读（可开）。
-- **手机优先**：PWA manifest、安全区适配、锁屏不熄（Wake Lock）、iOS 音频解锁、`audio/mp4` 录音兼容。
+- **手机优先**：装到桌面就是 App（PWA，无地址栏）、安全区适配、锁屏不熄（Wake Lock）、iOS 音频解锁、`audio/mp4` 录音兼容。
 
 ## 链路
 
@@ -60,7 +60,7 @@
 
 ```bash
 cp .env.example .env   # 填令牌/密钥
-npm test               # 11 个用例，含 SSE/静态/限流
+npm test               # 13 个用例，含 SSE/静态/限流/PWA
 npm start              # :8795
 ```
 
@@ -72,6 +72,16 @@ docker run -d --name voice-test -p 8795:8795 --env-file .env voice-chat:dev
 ```
 
 麦克风只在 **https 或 localhost** 下可用；手机真机测试必须走域名。
+
+## 装到桌面
+
+iPhone：Safari 打开 → 分享 → **添加到主屏幕** → 确认「作为 Web App」是开的 → 添加。
+装好后从图标进入是 standalone（无地址栏、独立任务切换卡片）。
+
+- `web/manifest.webmanifest`：`id` / `scope: /` / `display: standalone` / 180·192·512 图标（含 maskable）。
+  iOS 缺 `scope` 会退回 Safari 打开，这点别删。
+- `web/sw.js`：network-first，`/api/*` 不缓存 → 发版立刻生效，断网还能开壳。
+- iOS 只在“添加到主屏幕那一刻”读配置：**改过 manifest 后要把旧图标删掉重新添加**。
 
 ## 部署
 
