@@ -44,6 +44,6 @@ docker logs --tail 50 docker-voice-1 | grep -E '\[(tts|asr|barge)'
 - DNS：DNSPod A `voice → 103.205.240.62`（RecordId 2447626899，TTL 600）。
 - 网关：应用令牌 `voice`（chat-default / deepseek-v4.1-flash / 50 万 token 日限 / reasoning_effort=none）、
   `voice-asr`（provider-voice-asr = SiliconFlow XingChenASR，900 分钟/日）。
-- 密钥：`VOICE_TTS_KEY` 在 `/home/ubuntu/zxLumen-Blog/docker/.env`（0600）。
-  **主站网关目前没有 `/audio/speech`（实测 404）**，所以 TTS 只能应用侧直连 SiliconFlow。
+- TTS 走主站网关 `/audio/speech`（主站 `e12f0f7` 新增，2026-11-10 上线）：容器只拿
+  `VOICE_TTS_TOKEN`（应用令牌），SiliconFlow 密钥留在主站 `.env`，应用侧不再持有音频 key。
 - 应用栏：`apps_config` 含 `voice`（panel），图标 `docker/site-content/apps/voice.png`。

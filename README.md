@@ -28,7 +28,7 @@
     → POST /api/chat（SSE）
       → AI 网关 /chat/completions（deepseek-v4.1-flash，reasoning_effort=none）
     → POST /api/tts（每个短句一次，客户端最多 3 路并发）
-      → SiliconFlow /audio/speech（CosyVoice2，密钥在服务端环境变量）
+      → AI 网关 /audio/speech（provider audio = SiliconFlow CosyVoice2，密钥只在主站）
     → Web Audio 时间轴排播（可随时 stop，打断即全部停）
 ```
 
@@ -106,6 +106,6 @@ docker compose up -d voice && docker compose exec caddy caddy reload -c /etc/cad
 - 语音合成按句整段返回，不是边生成边播；上游抖动时单句可能 3~7s。
 - 外放时扬声器回声仍可能误触发打断（AEC 只能压一部分）；建议戴耳机，或在设置里关掉「开口即打断」。
 - 实时信息（天气/股价/新闻）没有联网工具，模型会直说不知道。
-- 主站网关**没有** `/audio/speech`（实测 404），所以 TTS 由应用侧直连 SiliconFlow
-  （`VOICE_TTS_MODE=direct`，密钥只在服务器 `.env`，前端拿不到）。网关补上该端点后可切 `gateway`。
+- TTS 走主站网关 `/audio/speech`（`VOICE_TTS_MODE=gateway` + `VOICE_TTS_TOKEN`），
+  SiliconFlow 密钥只在主站 `.env`；`direct` 只留给本地调试。
 - 没有服务端会话存储：换设备/清缓存，对话就没了（有意为之）。

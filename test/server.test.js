@@ -249,6 +249,21 @@ test('数字/单位/日期口语化', () => {
   assert.equal(normalizeForSpeech('电话 13800138000'), '电话一三八零零一三八零零零')
 })
 
+test('数字边界：千分位/负百分比/区间/缩写不拆字母', () => {
+  assert.equal(normalizeForSpeech('回撤 -12.3%'), '回撤负百分之十二点三')
+  assert.equal(normalizeForSpeech('预算 ¥1,234.5'), '预算一千二百三十四点五元')
+  assert.equal(normalizeForSpeech('3~5 天'), '三到五天')
+  assert.equal(normalizeForSpeech('望京SOHO 见'), '望京SOHO 见')
+  assert.equal(normalizeForSpeech('A/B 两版'), 'A或B 两版')
+})
+
+test('config 暴露转写模型与上下文润色开关', async () => {
+  const r = await fetch(`${base}/api/config`)
+  const j = await r.json()
+  assert.ok(j.asr.model, '应报告转写模型')
+  assert.equal(j.asr.polish, true)
+})
+
 test('朗读前清掉 Markdown/链接/表情', () => {
   const s = normalizeForSpeech('**加粗** 和 [链接](https://a.com) 以及 🎉 https://b.com/x')
   assert.equal(s.includes('*'), false)
