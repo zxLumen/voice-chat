@@ -1,34 +1,50 @@
-/* 随口 · 前端（无框架、无构建） */
+/* 随口 · 前端（无框架、无构建）
+ *
+ * v0.2 三件事：
+ *  1. 连续对话：麦克风常开、按人声自动切句上传，不再每轮点一次圆球。
+ *  2. 出声即打断：AI 说话时检测到持续人声（≥300ms）→ 立即停播 + 中断回复 + 转入听。
+ *  3. 句子流水线：LLM 边出字边切句，TTS 并发预取、按顺序无缝播放，首声更早、句间不卡。
+ */
 const $ = (id) => document.getElementById(id)
 
 const HISTORY_KEY = 'suikou.history.v1'
 const SETTINGS_KEY = 'suikou.settings.v1'
 const MAX_HISTORY = 20
 
-const DEFAULTS = { engine: 'server', voice: 'anna', speed: 1, autoSend: true, speakText: false, autoListen: false }
+const DEFAULTS = {
+  engine: 'server',
+  voice: 'anna',
+  speed: 1,
+  autoSend: true,
+  speakText: false,
+  autoListen: true,
+  bargeIn: true,
+}
 
 const S = {
   cfg: null,
   phase: 'boot',
   messages: [],
   settings: loadSettings(),
-  stream: null,
-  micAC: null,
-  analyser: null,
-  rec: null,
-  chunks: [],
-  mime: '',
-  pendingUpload: false,
-  vad: { raf: 0, start: 0, speech: 0, silence: 0, voiced: false, noiseSum: 0, noiseN: 0 },
+  call: false,
+  turn: 0,
+  mic: { stream: null, ac: null, analyser: null, data: null, raf: 0, noise: 0.012, candMs: 0 },
+  seg: null,
   chatAbort: null,
   replySpoken: false,
-  ttsSession: 0,
-  ttsQueue: [],
-  pumping: false,
-  ac: null,
-  sources: [],
+  streamDone: false,
+  tts: { session: 0, queue: [], endAt: 0, pumping: false, sources: [], cache: new Map(), ac: null, gain: null },
+  asrBusy: false,
+  asrQueue: [],
+  empties: 0,
   wakeLock: null,
+  tAskAt: 0,
+  tFirstAudioAt: 0,
+  lastActivity: 0,
+  installPrompt: null,
 }
+
+const speech = { zhVoices: [] }
 
 /* ---------------- storage ---------------- */
 
@@ -47,7 +63,11 @@ function saveSettings() {
 function loadHistory() {
   try {
     const arr = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
-    return Array.isArray(arr) ? arr.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string').slice(-MAX_HISTORY) : []
+    return Array.isArray(arr)
+      ? arr
+          .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+          .slice(-MAX_HISTORY)
+      : []
   } catch {
     return []
   }
@@ -58,7 +78,7 @@ function saveHistory() {
   } catch {}
 }
 
-/* ---------------- ui helpers ---------------- */
+/* ---------------- ui ---------------- */
 
 let toastTimer = 0
 function toast(msg, ms = 2600) {
@@ -69,20 +89,29 @@ function toast(msg, ms = 2600) {
   toastTimer = setTimeout(() => el.classList.remove('show'), ms)
 }
 
+const PHASE_TEXT = {
+  connecting: '正在打开麦克风…',
+  transcribing: '正在识别…',
+  thinking: '想着呢…',
+}
+
 function setPhase(phase, statusText) {
   S.phase = phase
   document.body.dataset.phase = phase
-  if (typeof statusText === 'string' && statusText) {
-    $('status').textContent = statusText
-  } else if (phase === 'idle') {
-    $('status').textContent = S.messages.length ? '接着说，或者直接打字' : '点一下，开始说话'
-  } else if (phase === 'speaking') {
-    $('status').textContent = '正在说…点一下可以打断'
-  }
-  if (phase === 'idle') $('orb').setAttribute('aria-label', '开始说话')
-  else if (phase === 'listening') $('orb').setAttribute('aria-label', '停止录音')
-  else $('orb').setAttribute('aria-label', '停止')
-  if (phase !== 'listening') setLevel(0)
+  const el = $('status')
+  if (typeof statusText === 'string' && statusText) el.textContent = statusText
+  else if (phase === 'idle') el.textContent = S.messages.length ? '点一下，就可以接着聊' : '点一下，开始说话'
+  else if (phase === 'listening') el.textContent = S.call ? '我在听，直接说就行' : '我在听…'
+  else if (phase === 'speaking') el.textContent = '正在说…你直接开口就能打断'
+  else if (PHASE_TEXT[phase]) el.textContent = PHASE_TEXT[phase]
+
+  const orb = $('orb')
+  if (phase === 'listening') orb.setAttribute('aria-label', '结束通话')
+  else if (phase === 'speaking' || phase === 'thinking') orb.setAttribute('aria-label', '打断')
+  else orb.setAttribute('aria-label', '开始说话')
+
+  document.body.classList.toggle('call-on', S.call)
+  if (phase !== 'listening' && phase !== 'speaking') setLevel(0)
 }
 
 function setLevel(rms) {
@@ -104,16 +133,20 @@ function addMsg(role, content = '') {
   return el
 }
 
-/* ---------------- audio unlock ---------------- */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/* ---------------- audio out ---------------- */
 
 function ensureAC() {
-  if (!S.ac) {
+  if (!S.tts.ac) {
     const AC = window.AudioContext || window.webkitAudioContext
     if (!AC) throw new Error('浏览器不支持音频播放')
-    S.ac = new AC()
+    S.tts.ac = new AC()
+    S.tts.gain = S.tts.ac.createGain()
+    S.tts.gain.connect(S.tts.ac.destination)
   }
-  if (S.ac.state === 'suspended') S.ac.resume().catch(() => {})
-  return S.ac
+  if (S.tts.ac.state === 'suspended') S.tts.ac.resume().catch(() => {})
+  return S.tts.ac
 }
 
 function unlockAudio() {
@@ -127,120 +160,230 @@ function unlockAudio() {
   } catch {}
 }
 
-/* ---------------- speech output ---------------- */
-
 function ttsEngine() {
   if (S.settings.engine === 'off') return 'off'
   if (S.settings.engine === 'server' && S.cfg?.tts?.enabled) return 'server'
   return 'browser'
 }
 
-function enqueueSpeech(raw) {
-  if (!S.replySpoken) return
-  const engine = ttsEngine()
-  if (engine === 'off') return
-  const text = cleanForSpeech(raw)
-  if (!text) return
-  S.ttsQueue.push({ text })
-  pumpSpeech()
-}
-
 function cleanForSpeech(t) {
   return String(t || '')
+    .replace(/```[\s\S]*?```/g, ' ')
     .replace(/[*_`#>~|]/g, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu, ' ')
     .replace(/[（(]\s*[)）]/g, '')
     .trim()
 }
 
-async function fetchTts(text) {
+/* ---------------- 句子切分（与 lib/text.js 同规则，前端只做切分） ---------------- */
+
+const HARD_END = '。！？!?；;\n…'
+const SOFT_END = '，,、：:'
+
+function splitSpeech(input, final = false, firstMax = 12, max = 30) {
+  const out = []
+  let rest = String(input || '')
+  for (;;) {
+    const limit = out.length === 0 ? firstMax : max
+    let cut = -1
+    let soft = -1
+    for (let i = 0; i < rest.length; i++) {
+      if (HARD_END.includes(rest[i])) {
+        cut = i
+        break
+      }
+      if (SOFT_END.includes(rest[i]) && i >= 5) soft = i
+      if (i >= limit) break
+    }
+    const preferSoft = soft >= 8 && (cut < 0 || cut - soft > 8)
+    if (!preferSoft && cut >= 0 && cut <= limit) {
+      out.push(rest.slice(0, cut + 1).trim())
+      rest = rest.slice(cut + 1)
+      continue
+    }
+    if (soft >= 0) {
+      out.push(rest.slice(0, soft + 1).trim())
+      rest = rest.slice(soft + 1)
+      continue
+    }
+    if (cut >= 0) {
+      out.push(rest.slice(0, cut + 1).trim())
+      rest = rest.slice(cut + 1)
+      continue
+    }
+    if (rest.length >= limit) {
+      out.push(rest.slice(0, limit).trim())
+      rest = rest.slice(limit)
+      continue
+    }
+    break
+  }
+  if (final && rest.trim()) {
+    out.push(rest.trim())
+    rest = ''
+  }
+  return { out: out.filter(Boolean), rest }
+}
+
+/* ---------------- TTS 流水线 ---------------- */
+
+function enqueueSpeech(raw) {
+  if (!S.replySpoken) return
+  if (ttsEngine() === 'off') return
+  const text = cleanForSpeech(raw)
+  if (!text) return
+  S.tts.queue.push({ text, key: `${S.settings.voice}|${S.settings.speed}|${text}`, buf: null, p: null })
+  dispatchTts()
+  pumpSpeech()
+}
+
+function dispatchTts() {
+  const session = S.tts.session
+  let inFlight = 0
+  for (const it of S.tts.queue) if (it.p && !it.buf) inFlight++
+  let slots = 3 - inFlight
+  for (const it of S.tts.queue) {
+    if (slots <= 0) break
+    if (it.p || it.buf) continue
+    slots--
+    it.p = fetchTts(it, session).catch((e) => {
+      console.warn('[tts]', e)
+      return null
+    })
+  }
+}
+
+async function fetchTts(item, session) {
+  const hit = S.tts.cache.get(item.key)
+  if (hit) return hit
   const res = await fetch('/api/tts', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text, voice: S.settings.voice, speed: S.settings.speed }),
+    body: JSON.stringify({ text: item.text, voice: S.settings.voice, speed: S.settings.speed }),
   })
   if (!res.ok) throw new Error(`tts ${res.status}`)
-  return res.arrayBuffer()
+  const ab = await res.arrayBuffer()
+  if (session !== S.tts.session) return null
+  const buf = await ensureAC().decodeAudioData(ab.slice(0))
+  if (S.tts.cache.size > 60) S.tts.cache.delete(S.tts.cache.keys().next().value)
+  S.tts.cache.set(item.key, buf)
+  return buf
 }
 
-async function pumpSpeech() {
-  if (S.pumping) return
-  S.pumping = true
-  const session = S.ttsSession
-  try {
-    while (S.ttsQueue.length && session === S.ttsSession) {
-      const item = S.ttsQueue.shift()
-      try {
-        if (ttsEngine() === 'server') {
-          // 只对当前句发起请求：先出声，再预取下一句（并发抢带宽会把第一句拖慢）
-          const ab = await (item.p || fetchTts(item.text))
-          if (session !== S.ttsSession) break
-          const next = S.ttsQueue[0]
-          if (next && !next.p) next.p = fetchTts(next.text).catch(() => null)
-          if (ab) await playBuffer(ab, session)
-        } else {
-          await speakBrowser(item.text, session)
-        }
-      } catch (e) {
-        console.warn('[tts]', e)
-        if (session === S.ttsSession) await speakBrowser(item.text, session).catch(() => {})
-      }
-    }
-  } finally {
-    S.pumping = false
-    if (session === S.ttsSession && !S.ttsQueue.length && S.phase === 'speaking') {
-      setPhase('idle')
-      maybeAutoListen()
-    }
-  }
-}
-
-async function playBuffer(ab, session) {
+function scheduleBuffer(buf, session) {
   const ac = ensureAC()
-  const buf = await ac.decodeAudioData(ab.slice(0))
-  if (session !== S.ttsSession) return
-  if (!S.tFirstAudioAt) {
+  const t = Math.max(ac.currentTime + 0.04, S.tts.endAt || 0)
+  if (S.tFirstAudioAt === 0) {
     S.tFirstAudioAt = performance.now()
-    console.info('[tts] first audio at', Math.round(S.tFirstAudioAt - (S.tAskAt || S.tFirstAudioAt)), 'ms after ask')
+    console.info('[tts] first sound at', Math.round(S.tFirstAudioAt - S.tAskAt), 'ms after ask')
+  } else if (S.tts.endAt && t - S.tts.endAt > 0.12) {
+    console.info('[tts] gap', Math.round((t - S.tts.endAt) * 1000), 'ms')
   }
   const src = ac.createBufferSource()
   src.buffer = buf
-  src.connect(ac.destination)
-  S.sources.push(src)
-  setPhase('speaking', '')
-  await new Promise((resolve) => {
-    src.onended = () => resolve()
-    try {
-      src.start()
-    } catch {
-      resolve()
-    }
-  })
-  S.sources = S.sources.filter((x) => x !== src)
+  src.connect(S.tts.gain || ac.destination)
+  S.tts.sources.push(src)
+  src.onended = () => {
+    S.tts.sources = S.tts.sources.filter((x) => x !== src)
+  }
+  src.start(t)
+  S.tts.endAt = t + buf.duration
+  if (session === S.tts.session && S.phase !== 'speaking') setPhase('speaking', '')
 }
 
-let zhVoices = []
-function loadZhVoices() {
+/**
+ * 按顺序播放：每句一到就排进 WebAudio 时间轴（不是 await 播放），
+ * 所以句与句之间没有 JS 等待造成的静音；只有真的没赶上才会出现 gap（会打日志）。
+ */
+async function pumpSpeech() {
+  if (S.tts.pumping) return
+  S.tts.pumping = true
+  const session = S.tts.session
   try {
-    zhVoices = (window.speechSynthesis?.getVoices() || []).filter((v) => /^zh|chinese|中文/i.test(`${v.lang} ${v.name}`))
-  } catch {
-    zhVoices = []
+    for (;;) {
+      if (session !== S.tts.session) return
+      if (S.tts.queue.length) {
+        const item = S.tts.queue[0]
+        if (ttsEngine() === 'browser') {
+          S.tts.queue.shift()
+          await speakBrowser(item.text, session)
+          continue
+        }
+        const buf = item.buf || (await item.p)
+        if (session !== S.tts.session) return
+        if (!buf) {
+          S.tts.queue.shift()
+          continue
+        }
+        S.tts.queue.shift()
+        scheduleBuffer(buf, session)
+        dispatchTts()
+        continue
+      }
+      if (S.streamDone) {
+        const remain = (S.tts.endAt || 0) - ensureAC().currentTime
+        if (remain <= 0) break
+        await sleep(Math.min(150, remain * 1000 + 20))
+        continue
+      }
+      await sleep(60)
+    }
+  } finally {
+    S.tts.pumping = false
   }
+  if (session === S.tts.session) onSpeechEnd()
 }
+
+function stopSpeaking({ silent = false } = {}) {
+  S.tts.session++
+  S.tts.queue = []
+  S.tts.endAt = 0
+  for (const src of S.tts.sources) {
+    try {
+      src.stop()
+    } catch {}
+  }
+  S.tts.sources = []
+  try {
+    window.speechSynthesis?.cancel()
+  } catch {}
+  if (!silent && S.phase === 'speaking') setPhase(S.call ? 'listening' : 'idle')
+}
+
+function onSpeechEnd() {
+  if (!S.call) {
+    setPhase('idle')
+    return
+  }
+  if (!S.settings.autoListen) {
+    endCall('说完了，点一下继续')
+    return
+  }
+  if (document.visibilityState !== 'visible') {
+    setPhase('idle', '页面在后台，点一下继续')
+    return
+  }
+  setPhase('listening', '我在听，直接说就行')
+}
+
+/* ---------------- 浏览器系统语音（兜底） ---------------- */
 
 function speakBrowser(text, session) {
   return new Promise((resolve) => {
     const synth = window.speechSynthesis
     if (!synth) return resolve()
     const u = new SpeechSynthesisUtterance(text)
-    if (!zhVoices.length) loadZhVoices()
-    if (zhVoices[0]) u.voice = zhVoices[0]
+    if (!speech.zhVoices.length) loadZhVoices()
+    if (speech.zhVoices[0]) u.voice = speech.zhVoices[0]
     u.lang = 'zh-CN'
     u.rate = Math.min(1.3, Math.max(0.7, Number(S.settings.speed) || 1))
     u.pitch = 1.02
     u.onend = () => resolve()
     u.onerror = () => resolve()
-    if (session === S.ttsSession) setPhase('speaking', '')
+    if (session === S.tts.session) setPhase('speaking', '')
     try {
       synth.speak(u)
     } catch {
@@ -249,40 +392,49 @@ function speakBrowser(text, session) {
   })
 }
 
-function stopSpeaking() {
-  S.ttsSession++
-  S.ttsQueue = []
-  for (const src of S.sources) {
-    try {
-      src.stop()
-    } catch {}
-  }
-  S.sources = []
+function loadZhVoices() {
   try {
-    window.speechSynthesis?.cancel()
-  } catch {}
-  if (S.phase === 'speaking') setPhase('idle', '')
+    speech.zhVoices = (window.speechSynthesis?.getVoices() || []).filter((v) => /^zh|chinese|中文/i.test(`${v.lang} ${v.name}`))
+  } catch {
+    speech.zhVoices = []
+  }
 }
 
-/* ---------------- mic + recording ---------------- */
+/* ---------------- 麦克风 + 常开分段录音 ---------------- */
 
 async function ensureMic() {
-  if (S.stream && S.stream.getAudioTracks().some((t) => t.readyState === 'live')) return S.stream
+  const live = S.mic.stream && S.mic.stream.getAudioTracks().some((t) => t.readyState === 'live')
+  if (live) return S.mic.stream
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('这个浏览器不支持麦克风')
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
   })
-  S.stream = stream
+  S.mic.stream = stream
   const AC = window.AudioContext || window.webkitAudioContext
   const ac = new AC()
   const src = ac.createMediaStreamSource(stream)
   const analyser = ac.createAnalyser()
   analyser.fftSize = 1024
-  analyser.smoothingTimeConstant = 0.65
+  analyser.smoothingTimeConstant = 0.6
   src.connect(analyser)
-  S.micAC = ac
-  S.analyser = analyser
+  S.mic.ac = ac
+  S.mic.analyser = analyser
+  S.mic.data = new Uint8Array(analyser.fftSize)
+  if (ac.state === 'suspended') ac.resume().catch(() => {})
   return stream
+}
+
+function releaseMic() {
+  try {
+    S.mic.stream?.getTracks().forEach((t) => t.stop())
+  } catch {}
+  S.mic.stream = null
+  S.mic.analyser = null
+  S.mic.data = null
+  try {
+    S.mic.ac?.close()
+  } catch {}
+  S.mic.ac = null
 }
 
 function pickMime() {
@@ -291,17 +443,161 @@ function pickMime() {
   return cands.find((t) => MediaRecorder.isTypeSupported(t)) || ''
 }
 
-async function startListening() {
-  if (S.phase === 'listening' || S.phase === 'transcribing' || S.phase === 'connecting') return
+function createSegment(voiced, now = performance.now()) {
+  if (!S.mic.stream) return null
+  const mime = pickMime()
+  let rec
+  try {
+    rec = mime ? new MediaRecorder(S.mic.stream, { mimeType: mime, audioBitsPerSecond: 32000 }) : new MediaRecorder(S.mic.stream)
+  } catch {
+    try {
+      rec = new MediaRecorder(S.mic.stream)
+    } catch {
+      return null
+    }
+  }
+  const seg = { rec, chunks: [], mime: rec.mimeType || mime || 'audio/webm', voiced, startedAt: now, lastVoiceAt: now, voiceMs: 0, bytes: 0, discard: false }
+  rec.ondataavailable = (e) => {
+    if (e.data && e.data.size) {
+      seg.chunks.push(e.data)
+      seg.bytes += e.data.size
+    }
+  }
+  rec.onstop = () => onSegmentStop(seg)
+  try {
+    rec.start(200)
+  } catch {
+    return null
+  }
+  return seg
+}
+
+function stopRec(seg) {
+  try {
+    if (seg.rec.state !== 'inactive') seg.rec.stop()
+  } catch {}
+}
+
+function onSegmentStop(seg) {
+  const blob = new Blob(seg.chunks, { type: seg.mime })
+  seg.chunks = []
+  if (seg.discard || !seg.voiced || blob.size < 1200) return
+  S.asrQueue.push(blob)
+  pumpAsr()
+}
+
+function rotateStandby() {
+  if (S.seg && !S.seg.voiced) {
+    S.seg.discard = true
+    stopRec(S.seg)
+    S.seg = S.call ? createSegment(false) : null
+  }
+}
+
+/* ---------------- VAD ---------------- */
+
+function startVad() {
+  if (S.mic.raf) return
+  if (!S.mic.analyser) return
+  const data = S.mic.data || new Uint8Array(S.mic.analyser.fftSize)
+  let last = performance.now()
+
+  const tick = () => {
+    S.mic.raf = 0
+    if (!S.call || !S.mic.analyser) return
+    const now = performance.now()
+    const dt = Math.min(100, Math.max(1, now - last))
+    last = now
+
+    S.mic.analyser.getByteTimeDomainData(data)
+    let sum = 0
+    for (let i = 0; i < data.length; i++) {
+      const v = (data[i] - 128) / 128
+      sum += v * v
+    }
+    const rms = Math.sqrt(sum / data.length)
+
+    const speaking = S.phase === 'speaking' || S.phase === 'thinking'
+    // 说话时扬声器回授会被 AEC 压一部分，剩下的靠抬高门限 + 更长的确认时间挡住
+    const floor = Math.max(0.005, Math.min(0.06, S.mic.noise))
+    const thr = speaking ? Math.max(0.03, floor * 2.6) : Math.max(0.018, floor * 2.4)
+    const above = rms > thr
+
+    if (above) S.mic.candMs += dt
+    else S.mic.candMs = Math.max(0, S.mic.candMs - dt * 1.6)
+
+    if (!S.seg?.voiced) {
+      if (S.mic.candMs >= 64) beginUtterance(now)
+    } else {
+      if (above) {
+        S.seg.lastVoiceAt = now
+        S.seg.voiceMs += dt
+      }
+      if (S.settings.bargeIn && speaking && S.seg.voiceMs >= 300) {
+        bargeIn()
+      } else if (S.seg.voiceMs > 80 && now - S.seg.lastVoiceAt > 650) {
+        endUtterance(now)
+      }
+    }
+
+    setLevel(S.seg?.voiced || above ? rms : 0)
+    if (!above) S.mic.noise = S.mic.noise * 0.9 + rms * 0.1
+    if (S.seg && !S.seg.voiced && now - S.seg.startedAt > 45_000) rotateStandby()
+    if (now - S.lastActivity > 300_000) {
+      endCall('5 分钟没说话，麦克风先关了')
+      return
+    }
+    S.mic.raf = requestAnimationFrame(tick)
+  }
+  S.mic.raf = requestAnimationFrame(tick)
+}
+
+function beginUtterance(now) {
+  S.lastActivity = now
+  if (S.seg) {
+    S.seg.discard = true
+    stopRec(S.seg)
+  }
+  S.seg = createSegment(true, now)
+  S.mic.candMs = 0
+  if (!S.seg) {
+    toast('录音启动失败，刷新页面再试')
+    endCall('麦克风出问题了')
+    return
+  }
+  if (S.phase === 'idle') setPhase('listening', '我在听…')
+}
+
+function endUtterance(now) {
+  const seg = S.seg
+  if (!seg) return
+  S.seg = null
+  S.lastActivity = now
+  stopRec(seg)
+  if (S.call) S.seg = createSegment(false, now)
+  setPhase('transcribing', '正在识别…')
+}
+
+function bargeIn() {
+  if (S.phase !== 'speaking' && S.phase !== 'thinking') return
+  console.info('[barge-in] 用户开口，停止播报')
+  if (S.chatAbort) S.chatAbort.abort()
+  stopSpeaking({ silent: true })
+  setPhase('listening', '嗯，你说')
+  toast('已停下，我在听', 1400)
+}
+
+/* ---------------- 通话 ---------------- */
+
+async function startCall() {
+  if (S.call) return
   if (!S.cfg?.asr?.enabled) return toast('语音识别还没配置好，先用打字吧')
   if (!window.isSecureContext) return toast('需要 https 才能用麦克风')
   if (!window.MediaRecorder) return toast('这个浏览器不支持录音，先用打字吧')
 
-  stopSpeaking()
-  if (S.chatAbort) S.chatAbort.abort()
+  stopSpeaking({ silent: true })
   unlockAudio()
   setPhase('connecting', '正在打开麦克风…')
-
   try {
     await ensureMic()
   } catch (e) {
@@ -310,141 +606,103 @@ async function startListening() {
     toast('需要麦克风权限，请在浏览器设置里允许后刷新')
     return
   }
-
-  S.chunks = []
-  S.pendingUpload = true
-  const mime = pickMime()
-  try {
-    S.rec = mime ? new MediaRecorder(S.stream, { mimeType: mime, audioBitsPerSecond: 32000 }) : new MediaRecorder(S.stream)
-  } catch {
-    try {
-      S.rec = new MediaRecorder(S.stream)
-    } catch {
-      setPhase('idle', '录音启动失败')
-      return
-    }
-  }
-  S.mime = S.rec.mimeType || mime || 'audio/webm'
-  S.rec.ondataavailable = (e) => {
-    if (e.data && e.data.size) S.chunks.push(e.data)
-  }
-  S.rec.onstop = () => {
-    const blob = new Blob(S.chunks, { type: S.mime })
-    S.chunks = []
-    if (!S.pendingUpload) return
-    if (blob.size < 900) {
-      setPhase('idle', '没听到声音，再说一次')
-      return
-    }
-    uploadAudio(blob)
-  }
-  S.rec.start(200)
-
-  S.vad = { raf: 0, start: performance.now(), speech: 0, silence: 0, voiced: false, noiseSum: 0, noiseN: 0 }
-  setPhase('listening', '我在听…')
+  S.call = true
+  S.empties = 0
+  S.lastActivity = performance.now()
   acquireWakeLock()
-  runVad()
+  S.seg = createSegment(false)
+  startVad()
+  setPhase('listening', '我在听，直接说就行')
 }
 
-function runVad() {
-  const analyser = S.analyser
-  const data = new Uint8Array(analyser.fftSize)
-  let last = performance.now()
-
-  const tick = () => {
-    if (S.phase !== 'listening') return
-    const now = performance.now()
-    const dt = Math.min(120, now - last)
-    last = now
-
-    analyser.getByteTimeDomainData(data)
-    let sum = 0
-    for (let i = 0; i < data.length; i++) {
-      const v = (data[i] - 128) / 128
-      sum += v * v
-    }
-    const rms = Math.sqrt(sum / data.length)
-    setLevel(rms)
-
-    const elapsed = now - S.vad.start
-    if (elapsed < 420) {
-      S.vad.noiseSum += rms
-      S.vad.noiseN += 1
-    }
-    const noise = S.vad.noiseN ? S.vad.noiseSum / S.vad.noiseN : 0.01
-    const threshold = Math.max(0.022, Math.min(0.13, noise * 2.3))
-
-    if (rms > threshold) {
-      S.vad.speech += dt
-      S.vad.silence = 0
-      S.vad.voiced = true
-    } else if (S.vad.voiced) {
-      S.vad.silence += dt
-    }
-
-    if (S.settings.autoSend && S.vad.voiced && S.vad.speech > 300 && S.vad.silence > 700) {
-      return endListening('auto')
-    }
-    const maxMs = (S.cfg?.asr?.maxSeconds || 60) * 1000
-    if (elapsed > maxMs) return endListening('max')
-    S.vad.raf = requestAnimationFrame(tick)
+function endCall(reason) {
+  const wasCall = S.call
+  S.call = false
+  if (S.mic.raf) cancelAnimationFrame(S.mic.raf)
+  S.mic.raf = 0
+  if (S.seg) {
+    S.seg.discard = true
+    stopRec(S.seg)
+    S.seg = null
   }
-  S.vad.raf = requestAnimationFrame(tick)
-}
-
-function endListening(reason = 'tap') {
-  if (S.phase !== 'listening') return
-  cancelAnimationFrame(S.vad.raf)
   releaseWakeLock()
+  stopSpeaking({ silent: true })
+  if (S.chatAbort) S.chatAbort.abort()
+  releaseMic()
   setLevel(0)
+  if (wasCall) setPhase('idle', reason || '点一下，继续聊')
+}
 
-  if (reason === 'tap' && S.vad.speech < 180) {
-    S.pendingUpload = false
-    setPhase('idle', '没听到声音，再说一次')
-    try {
-      if (S.rec && S.rec.state !== 'inactive') S.rec.stop()
-    } catch {}
-    return
-  }
-  setPhase('transcribing', '正在识别…')
+/* ---------------- ASR ---------------- */
+
+/** 最近 6 条消息 → base64url，塞进请求头当纠错上下文（不带音频，不额外请求）。 */
+function encodeCtx(messages) {
   try {
-    if (S.rec && S.rec.state !== 'inactive') S.rec.stop()
+    const rows = (messages || []).slice(-6).map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 160) }))
+    const bytes = new TextEncoder().encode(JSON.stringify(rows))
+    let s = ''
+    for (const b of bytes) s += String.fromCharCode(b)
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
   } catch {
-    setPhase('idle', '录音出错了')
+    return ''
   }
 }
 
-async function uploadAudio(blob) {
+async function pumpAsr() {
+  if (S.asrBusy) return
+  const blob = S.asrQueue.shift()
+  if (!blob) return
+  S.asrBusy = true
   const started = performance.now()
   try {
     const res = await fetch('/api/asr', {
       method: 'POST',
-      headers: { 'content-type': blob.type || 'audio/webm' },
+      headers: {
+        'content-type': blob.type || 'audio/webm',
+        // 最近几轮对话（base64url）给服务端做上下文纠错：专名/同音字靠它判断
+        'x-suikou-ctx': encodeCtx(S.messages),
+      },
       body: blob,
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(data.error || `识别失败 ${res.status}`)
-    if (!data.text) {
-      setPhase('idle', '没听清，再说一次')
+    const text = String(data.text || '').trim()
+    if (!text) {
+      S.empties++
+      setPhase(S.call ? 'listening' : 'idle', '没听清，再说一次')
+      if (S.empties >= 3) endCall('没听到声音，点一下继续')
       return
     }
-    console.info('[asr]', Math.round(performance.now() - started), 'ms', data.text)
-    addMsg('user', data.text)
-    await ask(data.text, true)
+    S.empties = 0
+    console.info(
+      '[asr]',
+      Math.round(performance.now() - started),
+      'ms',
+      `asr=${data.asrMs ?? '?'}ms polish=${data.polishMs ?? '?'}ms`,
+      text,
+      data.raw && data.raw !== text ? `(原文: ${data.raw})` : '',
+    )
+    addMsg('user', text)
+    await ask(text, true)
   } catch (e) {
     console.warn('[asr]', e)
-    setPhase('idle', '识别失败，再试一次')
+    setPhase(S.call ? 'listening' : 'idle', '识别失败，再试一次')
     toast(e instanceof Error ? e.message : '识别失败')
+  } finally {
+    S.asrBusy = false
+    if (S.asrQueue.length) pumpAsr()
   }
 }
 
-/* ---------------- chat ---------------- */
+/* ---------------- 对话 ---------------- */
 
 async function ask(text, spoken) {
-  if (S.phase === 'speaking') stopSpeaking()
+  stopSpeaking({ silent: true })
+  S.turn++
   S.tAskAt = performance.now()
   S.tFirstAudioAt = 0
-  S.replySpoken = spoken
+  S.streamDone = false
+  S.replySpoken = spoken && ttsEngine() !== 'off'
   S.messages.push({ role: 'user', content: text })
   saveHistory()
 
@@ -457,17 +715,12 @@ async function ask(text, spoken) {
   let buf = ''
   let gotToken = false
   const t0 = performance.now()
-  let tFirstToken = 0
-  let tFirstAudio = 0
-  let spokeAny = false
 
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        messages: S.messages.map((m) => ({ role: m.role, content: m.content })),
-      }),
+      body: JSON.stringify({ messages: S.messages.map((m) => ({ role: m.role, content: m.content })) }),
       signal: controller.signal,
     })
     if (!res.ok || !res.body) throw new Error(`对话失败 ${res.status}`)
@@ -497,14 +750,14 @@ async function ask(text, spoken) {
           if (typeof j.t === 'string' && j.t) {
             if (!gotToken) {
               gotToken = true
-              tFirstToken = performance.now() - t0
-              console.info('[llm] first token', Math.round(tFirstToken), 'ms')
+              console.info('[llm] first token', Math.round(performance.now() - t0), 'ms')
             }
             full += j.t
             buf += j.t
             bubble.textContent = full
             scrollChat()
-            const { out, rest } = splitSentences(buf, false)
+            // 首句（第一个逗号/句号）一到就先派给 TTS，不等整段生成完
+            const { out, rest } = splitSpeech(buf, false)
             buf = rest
             out.forEach(enqueueSpeech)
           }
@@ -513,90 +766,34 @@ async function ask(text, spoken) {
       }
     }
 
-    const tail = splitSentences(buf, true)
+    full = full.trim()
+    const tail = splitSpeech(buf, true)
     tail.out.forEach(enqueueSpeech)
     bubble.textContent = full || '（这次没说出话，再问一次？）'
     if (full) S.messages.push({ role: 'assistant', content: full })
     saveHistory()
-    if (!spoken) setPhase('idle')
-    else if (!S.ttsQueue.length && !S.pumping) {
-      setPhase('idle')
-      maybeAutoListen()
-    }
+    S.streamDone = true
+    if (!S.replySpoken) onSpeechEnd()
   } catch (e) {
-    if (controller.signal.aborted) return
+    if (controller.signal.aborted) {
+      // 被用户打断：保留已经说出来的半句，别让它从上下文里消失
+      if (full.trim()) {
+        S.messages.push({ role: 'assistant', content: full.trim() })
+        saveHistory()
+      }
+      return
+    }
     console.warn('[chat]', e)
     bubble.classList.add('err')
     bubble.textContent = full ? `${full}\n（网络断了，回复不完整）` : '这会儿连不上，稍后再试一次。'
-    setPhase('idle', '')
-    if (gotToken) S.messages.push({ role: 'assistant', content: full })
+    S.streamDone = true
+    if (!S.replySpoken) onSpeechEnd()
+    else if (!S.tts.queue.length && !S.tts.pumping) onSpeechEnd()
+    if (gotToken && full) S.messages.push({ role: 'assistant', content: full })
     saveHistory()
   } finally {
     if (S.chatAbort === controller) S.chatAbort = null
   }
-}
-
-const END_PUNCT = '。！？!?；;\n…'
-function splitSentences(input, final, first = false) {
-  let out = []
-  let rest = String(input || '')
-  for (;;) {
-    let cut = -1
-    for (let i = 0; i < rest.length; i++) {
-      if (END_PUNCT.includes(rest[i])) {
-        cut = i
-        break
-      }
-    }
-    if (cut >= 0) {
-      const s = rest.slice(0, cut + 1).trim()
-      rest = rest.slice(cut + 1)
-      if (s) out.push(s)
-      continue
-    }
-    // 首句优先出声：只要攒到 7 个字，就在第一个逗号处切，别等整句
-    if (first && rest.length >= 7) {
-      const idx = rest.search(/[，,、]/)
-      if (idx >= 4) {
-        out.push(rest.slice(0, idx + 1).trim())
-        rest = rest.slice(idx + 1)
-        continue
-      }
-    }
-    if (rest.length > 14) {
-      const idx = Math.max(rest.lastIndexOf('，'), rest.lastIndexOf(','), rest.lastIndexOf('、'))
-      if (idx >= 7) {
-        out.push(rest.slice(0, idx + 1).trim())
-        rest = rest.slice(idx + 1)
-      } else {
-        out.push(rest.slice(0, 24).trim())
-        rest = rest.slice(24)
-      }
-      continue
-    }
-    break
-  }
-  if (final && rest.trim()) out.push(rest.trim())
-  return { out, rest }
-}
-
-function maybeAutoListen() {
-  if (!S.settings.autoListen || !S.replySpoken) return
-  if (document.visibilityState !== 'visible') return
-  if (S.phase !== 'idle') return
-  setTimeout(() => {
-    if (S.phase === 'idle' && S.settings.autoListen) startListening()
-  }, 320)
-}
-
-function newConversation() {
-  if (S.chatAbort) S.chatAbort.abort()
-  stopSpeaking()
-  S.messages = []
-  saveHistory()
-  $('chat').innerHTML = ''
-  document.body.classList.remove('has-chat')
-  setPhase('idle', '点一下，开始说话')
 }
 
 /* ---------------- wake lock ---------------- */
@@ -612,11 +809,8 @@ function releaseWakeLock() {
   } catch {}
   S.wakeLock = null
 }
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && S.phase === 'listening') acquireWakeLock()
-})
 
-/* ---------------- settings sheet ---------------- */
+/* ---------------- 设置面板 ---------------- */
 
 function openSheet() {
   syncSheet()
@@ -639,9 +833,8 @@ function syncSheet() {
   $('chkAuto').checked = S.settings.autoSend
   $('chkSpeakText').checked = S.settings.speakText
   $('chkAutoListen').checked = S.settings.autoListen
-  $('engineNote').textContent = S.cfg?.tts?.enabled
-    ? ''
-    : '· 当前没接服务端语音，会用手机自带的系统语音朗读。'
+  $('chkBarge').checked = S.settings.bargeIn
+  $('engineNote').textContent = S.cfg?.tts?.enabled ? '' : '· 当前没接服务端语音，会用手机自带的系统语音朗读。'
 }
 
 function fillVoices() {
@@ -693,6 +886,10 @@ function bindSettings() {
     S.settings.autoListen = e.target.checked
     saveSettings()
   })
+  $('chkBarge').addEventListener('change', (e) => {
+    S.settings.bargeIn = e.target.checked
+    saveSettings()
+  })
   $('btnClear').addEventListener('click', () => {
     newConversation()
     closeSheet()
@@ -700,7 +897,18 @@ function bindSettings() {
   })
 }
 
-/* ---------------- init ---------------- */
+function newConversation() {
+  if (S.chatAbort) S.chatAbort.abort()
+  stopSpeaking({ silent: true })
+  S.messages = []
+  S.tts.cache.clear()
+  saveHistory()
+  $('chat').innerHTML = ''
+  document.body.classList.remove('has-chat')
+  setPhase(S.call ? 'listening' : 'idle')
+}
+
+/* ---------------- 初始化 ---------------- */
 
 function autosize(el) {
   el.style.height = 'auto'
@@ -734,7 +942,6 @@ function registerSw() {
   navigator.serviceWorker.register('/sw.js').catch(() => {})
 }
 
-// iPhone Safari 里没装到桌面时给一句提示；装好后（standalone）不再出现
 function maybeInstallTip() {
   const tip = $('installTip')
   if (!tip || isStandalone()) return
@@ -760,14 +967,16 @@ async function boot() {
 
   $('orb').addEventListener('click', () => {
     unlockAudio()
-    if (S.phase === 'listening') return endListening('tap')
+    if (S.phase === 'listening') return endCall()
     if (S.phase === 'transcribing') return
-    if (S.phase === 'thinking' || S.phase === 'speaking') {
+    if (S.phase === 'speaking' || S.phase === 'thinking') {
       if (S.chatAbort) S.chatAbort.abort()
-      stopSpeaking()
-      setPhase('idle', '')
+      stopSpeaking({ silent: true })
+      if (!S.call) startCall()
+      else setPhase('listening', '我在听，直接说就行')
+      return
     }
-    startListening()
+    startCall()
   })
 
   $('btnNew').addEventListener('click', newConversation)
@@ -779,19 +988,18 @@ async function boot() {
     unlockAudio()
     const v = input.value.trim()
     if (!v) return
-    if (S.phase === 'listening') endListening('tap')
     if (S.phase === 'thinking') return toast('等我先说这句')
     input.value = ''
     autosize(input)
     addMsg('user', v)
-    ask(v, S.settings.speakText)
+    ask(v, S.call || S.settings.speakText)
   })
 
   for (const chip of document.querySelectorAll('#chips button')) {
     chip.addEventListener('click', () => {
       unlockAudio()
       addMsg('user', chip.textContent)
-      ask(chip.textContent, S.settings.speakText)
+      ask(chip.textContent, S.call || S.settings.speakText)
     })
   }
 
@@ -810,16 +1018,19 @@ async function boot() {
   fillVoices()
   syncSheet()
 
-  if (!S.cfg?.asr?.enabled) {
-    $('hint').textContent = '语音识别暂不可用 · 先用打字'
-  } else if (!window.isSecureContext) {
-    $('hint').textContent = '需要 https 才能录音 · 先用打字'
-  }
-  if (S.cfg?.tts?.enabled) $('hint').textContent = '也可以直接打字 · 录音只在本次识别，不保存'
-  setPhase('idle', S.messages.length ? '接着说，或者直接打字' : '点一下，开始说话')
+  if (!S.cfg?.asr?.enabled) $('hint').textContent = '语音识别暂不可用 · 先用打字'
+  else if (!window.isSecureContext) $('hint').textContent = '需要 https 才能录音 · 先用打字'
 
+  setPhase('idle')
   registerSw()
   maybeInstallTip()
+
+  // 页面回到前台时，如果还在通话，恢复 VAD（后台 rAF 会被浏览器停掉）
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return
+    if (S.call && !S.mic.raf) startVad()
+    if (S.call) acquireWakeLock()
+  })
 }
 
 boot()

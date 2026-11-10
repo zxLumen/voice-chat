@@ -15,14 +15,15 @@ voice:
     VOICE_ASR_TOKEN: ${VOICE_ASR_TOKEN:-}
     VOICE_ASR_MODEL: ${VOICE_ASR_MODEL:-XingChenAGI/XingChenASR-V3.2}
     VOICE_MODEL: ${VOICE_MODEL:-deepseek-v4.1-flash}
-    # TTS：gateway = 主站网关 /audio/speech（推荐，密钥只在主站）/ direct = 直连（本地调试）
-    VOICE_TTS_MODE: ${VOICE_TTS_MODE:-gateway}
-    VOICE_TTS_TOKEN: ${VOICE_TTS_TOKEN:-}
+    # TTS：direct = 直连 SiliconFlow（网关还没 /audio/speech，当前唯一可用）
+    VOICE_TTS_MODE: ${VOICE_TTS_MODE:-direct}
+    VOICE_TTS_BASE_URL: ${VOICE_TTS_BASE_URL:-https://api.siliconflow.cn/v1}
+    VOICE_TTS_KEY: ${VOICE_TTS_KEY:-}
     VOICE_TTS_MODEL: ${VOICE_TTS_MODEL:-FunAudioLLM/CosyVoice2-0.5B}
     VOICE_TTS_VOICE: ${VOICE_TTS_VOICE:-anna}
-    # direct 模式才用：
-    # VOICE_TTS_BASE_URL: https://api.siliconflow.cn/v1
-    # VOICE_TTS_KEY: sk-xxx
+    VOICE_TTS_KEEPWARM_MS: ${VOICE_TTS_KEEPWARM_MS:-180000}
+    VOICE_ASR_POLISH: ${VOICE_ASR_POLISH:-on}
+    VOICE_ASR_POLISH_MS: ${VOICE_ASR_POLISH_MS:-2000}
   expose:
     - "8795"
   networks:

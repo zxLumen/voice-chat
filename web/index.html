@@ -52,8 +52,8 @@
               <i></i><i></i><i></i><i></i><i></i>
             </div>
           </div>
-          <p class="status" id="status">点一下，开始说话</p>
-          <p class="hint" id="hint">也可以直接打字 · 录音只在本次识别，不保存</p>
+          <p class="status" id="status">点一下，开个免提通话</p>
+          <p class="hint" id="hint">说话即可，不用反复点 · 录音只在本次识别，不保存</p>
 
           <div class="chips" id="chips">
             <button type="button">讲个冷笑话，三句话以内</button>
@@ -108,10 +108,15 @@
           <input id="chkSpeakText" type="checkbox" />
         </label>
         <label class="row switch-row">
-          <span>说完自动继续听<small>（建议戴耳机，避免回声）</small></span>
-          <input id="chkAutoListen" type="checkbox" />
+          <span>连续对话<small>（免提，AI 说完自动继续听）</small></span>
+          <input id="chkAutoListen" type="checkbox" checked />
+        </label>
+        <label class="row switch-row">
+          <span>开口即打断<small>（AI 说话时你说话会立刻停下听你说）</small></span>
+          <input id="chkBarge" type="checkbox" checked />
         </label>
         <div class="sheet-notes">
+          <p>· 通话时麦克风保持开启，说完一句自动识别；点圆球或 5 分钟不说话会自动关麦。</p>
           <p>· 录音仅用于本次识别，转完即删，不落盘、不留存。</p>
           <p>· 对话只存在这台设备的浏览器里，换设备/清缓存即消失。</p>
           <p id="engineNote"></p>

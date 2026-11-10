@@ -8,15 +8,18 @@ import {
   MAX_ASR_BYTES,
   MAX_ASR_SECONDS,
   MODEL,
+  POLISH_ENABLED,
   PORT,
   TTS_DAILY_CHARS,
+  TTS_KEEPWARM_MS,
   TTS_MODE,
   VERSION,
   VOICES,
 } from './lib/env.js'
 import { asrReady, transcribe, warmupAsr } from './lib/asr.js'
 import { streamChat } from './lib/llm.js'
-import { synthesize, ttsEnabled } from './lib/tts.js'
+import { polishStats, polishTranscript } from './lib/polish.js'
+import { synthesize, ttsEnabled, ttsStats, warmupTts } from './lib/tts.js'
 import { RateLimiter, clientIp, json, readBody, readJson, sseHead, sseSend, text } from './lib/util.js'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
@@ -25,7 +28,7 @@ const WEB = path.join(ROOT, 'web')
 const limits = {
   chat: new RateLimiter(40, 5 * 60_000),
   asr: new RateLimiter(30, 5 * 60_000),
-  tts: new RateLimiter(120, 5 * 60_000),
+  tts: new RateLimiter(300, 5 * 60_000),
 }
 
 const bjDay = () => new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10)
@@ -83,9 +86,9 @@ function serveStatic(req, res, pathname) {
 const config = {
   version: VERSION,
   model: MODEL,
-  asr: { enabled: asrReady(), maxSeconds: MAX_ASR_SECONDS, model: ASR_MODEL },
+  asr: { enabled: asrReady(), maxSeconds: MAX_ASR_SECONDS, model: ASR_MODEL, polish: POLISH_ENABLED },
   tts: { enabled: ttsEnabled(), mode: TTS_MODE, voices: VOICES, defaultVoice: VOICES[0].id },
-  limits: { chatPer5min: 40, asrPer5min: 30, ttsPer5min: 120 },
+  limits: { chatPer5min: 40, asrPer5min: 30, ttsPer5min: 300 },
 }
 
 async function handleChat(req, res) {
@@ -127,6 +130,22 @@ async function handleChat(req, res) {
   }
 }
 
+/** 前端把最近几轮对话（每条 ≤160 字）base64url 编码放进 x-suikou-ctx。 */
+function readCtx(req) {
+  const raw = String(req.headers['x-suikou-ctx'] || '')
+  if (!raw || raw.length > 4096) return []
+  try {
+    const arr = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'))
+    if (!Array.isArray(arr)) return []
+    return arr
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      .slice(-8)
+      .map((m) => ({ role: m.role, content: m.content.slice(0, 160) }))
+  } catch {
+    return []
+  }
+}
+
 async function handleAsr(req, res) {
   const ip = clientIp(req)
   if (!limits.asr.take(ip)) return json(res, 429, { error: '识别太频繁，歇一会儿。' })
@@ -148,7 +167,22 @@ async function handleAsr(req, res) {
     const r = await transcribe(buf, { contentType: type })
     if (!r.text) return json(res, 200, { text: '', ms: r.ms })
     if (r.seconds && r.seconds > MAX_ASR_SECONDS + 2) return json(res, 413, { error: '单次录音请控制在 60 秒内' })
-    return json(res, 200, r)
+    // 上下文纠错：前端把最近几轮对话塞在 x-suikou-ctx（base64url JSON）里，
+    // 让后处理知道「对位」「StockApp」这些词，别把专名听成同音字。
+    const t1 = Date.now()
+    const p = await polishTranscript({ text: r.text, history: readCtx(req) })
+    console.log(
+      `[asr] raw=${r.text.length}字 → ${p.polished ? '润色' : '原文'} ${p.text.length}字 asr=${r.ms}ms polish=${Date.now() - t1}ms`,
+    )
+    return json(res, 200, {
+      text: p.text,
+      raw: r.text,
+      polished: p.polished,
+      seconds: r.seconds,
+      ms: r.ms + p.ms,
+      asrMs: r.ms,
+      polishMs: p.ms,
+    })
   } catch (e) {
     console.error('[asr]', e instanceof Error ? e.message : e)
     return json(res, 502, { error: '没听清，再说一次？' })
@@ -168,12 +202,14 @@ async function handleTts(req, res) {
   }
   const chars = String(body.text || '').length
   if (!chargeTts(chars)) return json(res, 429, { error: '今天说得有点多，明天再聊。' })
+  const t0 = Date.now()
   try {
     const buf = await synthesize({ text: body.text, voice: body.voice, speed: body.speed })
     res.writeHead(200, {
       'content-type': 'audio/mpeg',
       'content-length': buf.length,
       'cache-control': 'private, max-age=3600',
+      'x-tts-ms': String(Date.now() - t0),
       ...SECURITY_HEADERS,
     })
     res.end(buf)
@@ -197,6 +233,8 @@ const server = http.createServer(async (req, res) => {
         tts: ttsEnabled(),
         ttsMode: TTS_MODE,
         model: MODEL,
+        ttsStats: { ...ttsStats },
+        asrPolish: { ...polishStats, enabled: POLISH_ENABLED },
         uptime: Math.round(process.uptime()),
       })
     }
@@ -224,6 +262,16 @@ server.listen(PORT, () => {
       .catch((e) => console.error('[suikou] warmup failed', e))
   warm()
   if (keepWarmMs > 0) setInterval(warm, keepWarmMs).unref()
+
+  // TTS 保温：CosyVoice2 空闲后首包实测 13.8s，定时喂一小句压住冷启动
+  if (TTS_KEEPWARM_MS > 0 && ttsEnabled()) {
+    const warmTts = () =>
+      warmupTts()
+        .then((r) => console.log('[suikou] tts warmup', JSON.stringify(r)))
+        .catch((e) => console.error('[suikou] tts warmup failed', e))
+    setTimeout(warmTts, 3000).unref?.()
+    setInterval(warmTts, TTS_KEEPWARM_MS).unref()
+  }
 })
 
 for (const sig of ['SIGTERM', 'SIGINT']) {

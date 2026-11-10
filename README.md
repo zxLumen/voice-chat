@@ -8,10 +8,12 @@
 
 一个「豆包式」的语音对话页：
 
-- **点一下说话**：浏览器录音 → 静音 0.7 秒自动停 → 转写 → 大模型 → 朗读。
-- **流式回复**：模型边生成边显示，按句合成语音；第一句先出声，后面的句子边播边预取。
-- **可打断**：说话中再点一下圆球，立即停播并开始听。
+- **免提连续对话**：点一次圆球进通话，麦克风常开、按人声自动切句；AI 说完自动继续听，不用每轮点一次。
+- **开口即打断**：AI 说话/思考时你开口（持续 300ms）立即停播并中断回复，转听。
+- **流式回复 + 句子流水线**：模型边生成边切句，TTS 最多 3 路并发预取，WebAudio 时间轴顺序排播（句间 0 gap）。
+- **数字/单位口语化**：37.5% → 百分之三十七点五，2026-11-10 → 二零二六年十一月十日，Markdown/链接/表情不念。
 - **两种输入**：语音为主，底部随时可以打字；文字回复默认不朗读（可开）。
+- **8 个音色**：anna / bella / claire / diana / benjamin / charles / david / alex。
 - **手机优先**：装到桌面就是 App（PWA，无地址栏）、安全区适配、锁屏不熄（Wake Lock）、iOS 音频解锁、`audio/mp4` 录音兼容。
 
 ## 链路
@@ -19,14 +21,15 @@
 ```
 手机浏览器
   MediaRecorder(webm/opus 或 mp4/aac)
-    → POST /api/asr（原始音频体，12MB 上限）
+    → POST /api/asr（原始音频体，12MB 上限；最近 6 轮对话放 x-suikou-ctx 供纠错）
       → ffmpeg 16k 单声道 mp3
       → AI 网关 /audio/transcriptions（SiliconFlow XingChenASR）
+      → 可选：中英混说/长句走一次 LLM 润色（≤2s，失败回退原文）
     → POST /api/chat（SSE）
       → AI 网关 /chat/completions（deepseek-v4.1-flash，reasoning_effort=none）
-    → POST /api/tts（每句一次）
-      → AI 网关 /audio/speech（SiliconFlow CosyVoice2，密钥只在主站）
-    → Web Audio 排队播放（可随时 stop）
+    → POST /api/tts（每个短句一次，客户端最多 3 路并发）
+      → SiliconFlow /audio/speech（CosyVoice2，密钥在服务端环境变量）
+    → Web Audio 时间轴排播（可随时 stop，打断即全部停）
 ```
 
 - 真实 key 只在服务端环境变量里，前端拿不到；`/api/config` 不会回显任何密钥。
@@ -37,30 +40,32 @@
 
 | 环节 | 耗时 |
 | --- | --- |
-| 转写（网关，4s 语音，XingChenASR） | 0.49 ~ 0.85s |
-| 首个 token | 1.2 ~ 1.4s（deepseek-v4.1-flash） |
-| 首句合成 | 0.8 ~ 1.6s（CosyVoice2，随句长；首句在第一个逗号处就切） |
-| **松手 → 第一声** | **约 2.5 ~ 3.5s** |
+| 转写（XingChenASR，3~5s 语音） | 0.46 ~ 0.98s（短句不润色） |
+| 润色（仅中英混说 / ≥24 字） | 1.2 ~ 1.6s，超 2s 回退原文 |
+| 首个 token | 1.2 ~ 1.5s（deepseek-v4.1-flash） |
+| 首句合成 | 1.2 ~ 2.5s（CosyVoice2，首句 ≤12 字、按逗号断） |
+| **说完 → 第一声** | **约 3.0 ~ 4.4s**（ask 起算；含 ASR 全程约 4~5s） |
 
-没做流式 ASR / 流式 TTS，所以还追不上豆包的 1s 级；后续接网关 `/audio/speech` 流式再压。
+没做流式 ASR / 流式 TTS，追不上豆包的 1s 级：SiliconFlow `/audio/speech` 是生成完再整段吐，
+首包 1.2s 起。当前优化的是「不冷启动、句间不断、能打断」。
 
 ## 接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | `{ok,llm,asr,tts,tssMode,model,uptime}` |
+| GET | `/api/health` | `{ok,llm,asr,tts,ttsMode,ttsStats,asrPolish,model,uptime}` |
 | GET | `/api/config` | 能力、音色、限额（不含密钥） |
-| POST | `/api/asr` | 原始音频体（`audio/webm` / `audio/mp4`），返回 `{text,seconds,ms}` |
+| POST | `/api/asr` | 原始音频体（`audio/webm` / `audio/mp4`），返回 `{text,raw,polished,seconds,ms,asrMs,polishMs}` |
 | POST | `/api/chat` | `{messages:[{role,content}]}`，SSE：`data:{"t":"增量"}` … `data:{"done":true}` |
 | POST | `/api/tts` | `{text,voice,speed}` → `audio/mpeg` |
 
-限流：对话 40 次/5 分钟/IP、转写 30 次/5 分钟/IP、合成 120 次/5 分钟/IP；TTS 另有每日字数上限（默认 8 万，按北京日）。
+限流：对话 40 次/5 分钟/IP、转写 30 次/5 分钟/IP、合成 300 次/5 分钟/IP（免提会按句请求）；TTS 另有每日字数上限（默认 8 万，按北京日）。
 
 ## 本地跑
 
 ```bash
 cp .env.example .env   # 填令牌/密钥
-npm test               # 13 个用例，含 SSE/静态/限流/PWA
+npm test               # 17 个用例：SSE/静态/限流/PWA/数字归一化/切句/TTS 归一化
 npm start              # :8795
 ```
 
@@ -97,9 +102,10 @@ docker compose up -d voice && docker compose exec caddy caddy reload -c /etc/cad
 
 ## 已知限制
 
-- 没有流式 ASR：必须等录音结束才知道说了什么。
-- 语音合成按句整段返回，不是边生成边播。
+- 没有流式 ASR：必须等一句说完（静音 0.65s）才知道说了什么。
+- 语音合成按句整段返回，不是边生成边播；上游抖动时单句可能 3~7s。
+- 外放时扬声器回声仍可能误触发打断（AEC 只能压一部分）；建议戴耳机，或在设置里关掉「开口即打断」。
 - 实时信息（天气/股价/新闻）没有联网工具，模型会直说不知道。
-- TTS 已走主站网关 `/audio/speech`（`VOICE_TTS_MODE=gateway`），应用侧不再持有 SiliconFlow 密钥；
-  直连模式只留给本地调试。
+- 主站网关**没有** `/audio/speech`（实测 404），所以 TTS 由应用侧直连 SiliconFlow
+  （`VOICE_TTS_MODE=direct`，密钥只在服务器 `.env`，前端拿不到）。网关补上该端点后可切 `gateway`。
 - 没有服务端会话存储：换设备/清缓存，对话就没了（有意为之）。

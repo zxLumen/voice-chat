@@ -5,11 +5,14 @@ import { spawn } from 'node:child_process'
 import { cleanTranscript } from '../lib/asr.js'
 import { trimHistory, SYSTEM_PROMPT } from '../lib/llm.js'
 import { RateLimiter, LruCache } from '../lib/util.js'
+import { intToChinese, normalizeForSpeech, splitForSpeech } from '../lib/text.js'
+import { acceptPolish, cleanPolishOutput, shouldPolish } from '../lib/polish.js'
 
 const UP_PORT = 18898
 const APP_PORT = 18899
 let up
 let app
+let lastSpeech = null
 
 const sse = (res, objs) => {
   res.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -45,8 +48,15 @@ before(async () => {
       return
     }
     if (req.url.endsWith('/audio/speech')) {
-      res.writeHead(200, { 'content-type': 'audio/mpeg' })
-      res.end(Buffer.from('ID3fake-mp3'))
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        try {
+          lastSpeech = JSON.parse(body)
+        } catch {}
+        res.writeHead(200, { 'content-type': 'audio/mpeg' })
+        res.end(Buffer.from('ID3fake-mp3'))
+      })
       return
     }
     res.writeHead(404).end()
@@ -67,6 +77,7 @@ before(async () => {
       VOICE_TTS_MODE: 'direct',
       VOICE_TTS_BASE_URL: `http://127.0.0.1:${UP_PORT}`,
       VOICE_TTS_KEY: 'test-tts',
+      VOICE_TTS_KEEPWARM_MS: '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -102,11 +113,11 @@ test('health 报告 llm/asr/tts 就绪', async () => {
   assert.equal(j.tts, true)
 })
 
-test('config 暴露 4 个音色且不泄露密钥', async () => {
+test('config 暴露 8 个音色且不泄露密钥', async () => {
   const r = await fetch(`${base}/api/config`)
   const j = await r.json()
   assert.equal(j.tts.enabled, true)
-  assert.equal(j.tts.voices.length, 4)
+  assert.equal(j.tts.voices.length, 8)
   assert.equal(JSON.stringify(j).includes('test-tts'), false)
 })
 
@@ -224,4 +235,66 @@ test('LruCache 按容量淘汰', () => {
   c.set('c', Buffer.alloc(10))
   assert.equal(c.get('a'), null)
   assert.ok(c.get('c'))
+})
+
+test('数字/单位/日期口语化', () => {
+  assert.equal(intToChinese(0), '零')
+  assert.equal(intToChinese(10), '十')
+  assert.equal(intToChinese(1234), '一千二百三十四')
+  assert.equal(intToChinese(10001), '一万零一')
+  assert.equal(normalizeForSpeech('答案是 37.5%'), '答案是百分之三十七点五')
+  assert.equal(normalizeForSpeech('2026-11-10 见'), '二零二六年十一月十日见')
+  assert.equal(normalizeForSpeech('14:30 开会'), '十四点三十分开会')
+  assert.equal(normalizeForSpeech('跑了 5km'), '跑了五公里')
+  assert.equal(normalizeForSpeech('电话 13800138000'), '电话一三八零零一三八零零零')
+})
+
+test('朗读前清掉 Markdown/链接/表情', () => {
+  const s = normalizeForSpeech('**加粗** 和 [链接](https://a.com) 以及 🎉 https://b.com/x')
+  assert.equal(s.includes('*'), false)
+  assert.equal(s.includes('http'), false)
+  assert.equal(s.includes('🎉'), false)
+  assert.match(s, /加粗/)
+  assert.match(s, /链接/)
+})
+
+test('首句切得短、碎句不丢字', () => {
+  const t = '你好呀，我是随口。今天想跟你聊聊最近在忙的事情，顺便看看有没有什么能帮上忙的。'
+  const { out, rest } = splitForSpeech(t, true)
+  assert.ok(out.length >= 3)
+  assert.ok(out[0].length <= 16)
+  assert.equal(out.join(''), t)
+  assert.equal(rest, '')
+  assert.deepEqual(splitForSpeech('你好，我是随口', true).out, ['你好，我是随口'])
+})
+
+test('TTS 请求前会做口语化（数字/单位）', async () => {
+  const r = await fetch(`${base}/api/tts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '2026年11月10日，气温 37.5%，跑了 5km。', voice: 'anna', speed: 1 }),
+  })
+  assert.equal(r.status, 200)
+  assert.ok(r.headers.get('x-tts-ms'))
+  assert.ok(lastSpeech, '上游应收到合成请求')
+  assert.match(lastSpeech.input, /二零二六年十一月十日/)
+  assert.match(lastSpeech.input, /百分之三十七点五/)
+  assert.match(lastSpeech.input, /五公里/)
+  assert.equal(lastSpeech.input.includes('%'), false)
+})
+
+
+test('润色只在值得等的时候触发（短句 0ms）', () => {
+  assert.equal(shouldPolish('嗯'), false)
+  assert.equal(shouldPolish('今天天气不错'), false)
+  assert.equal(shouldPolish('把那个 stock app 的 holdout 再跑一遍'), true)
+  assert.equal(shouldPolish('帮我看看昨天晚上部署的那一堆容器现在还有几个在跑'), true)
+})
+
+test('润色输出清洗与守卫', () => {
+  assert.equal(cleanPolishOutput('“把那个 StockApp 的 holdout 再跑一遍。”'), '把那个 StockApp 的 holdout 再跑一遍。')
+  assert.equal(cleanPolishOutput('输出：你好。\n多余解释'), '你好。')
+  assert.equal(acceptPolish('帮我讲个冷笑话三句话以内。', '帮我讲个冷笑话，三句话以内。'), true)
+  assert.equal(acceptPolish('帮我讲个冷笑话。', '抱歉，作为一个 AI 我无法…'), false)
+  assert.equal(acceptPolish('短句', '一句完全不相干而且很长很长很长的回答内容'), false)
 })

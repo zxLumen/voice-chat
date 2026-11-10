@@ -2,7 +2,7 @@
   "id": "/",
   "name": "随口 · 语音助手",
   "short_name": "随口",
-  "description": "打开网页就能说话的大模型语音助手",
+  "description": "随口 · 免提连续对话的大模型语音助手，手机浏览器直接用。",
   "lang": "zh-CN",
   "dir": "ltr",
   "start_url": "/",
@@ -11,12 +11,35 @@
   "orientation": "portrait",
   "background_color": "#07080d",
   "theme_color": "#07080d",
-  "categories": ["productivity", "utilities"],
+  "categories": [
+    "productivity",
+    "utilities"
+  ],
   "prefer_related_applications": false,
   "icons": [
-    { "src": "/icon-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "/icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }
