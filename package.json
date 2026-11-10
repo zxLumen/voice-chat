@@ -1,6 +1,6 @@
 {
   "name": "suikou-voice-chat",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "随口 · 手机浏览器可用的大模型语音聊天（零依赖 Node）",

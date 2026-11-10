@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { cleanTranscript } from '../lib/asr.js'
-import { trimHistory, SYSTEM_PROMPT } from '../lib/llm.js'
+import { trimHistory, SYSTEM_PROMPT, buildSystemPrompt } from '../lib/llm.js'
 import { RateLimiter, LruCache } from '../lib/util.js'
 import { intToChinese, normalizeForSpeech, splitForSpeech } from '../lib/text.js'
 import { acceptPolish, cleanPolishOutput, shouldPolish } from '../lib/polish.js'
@@ -230,6 +230,15 @@ test('trimHistory 只留最近 16 条合法消息', () => {
   assert.equal(out.length, 16)
   assert.equal(out[0].content, '14')
   assert.ok(SYSTEM_PROMPT.includes('随口'))
+})
+
+test('buildSystemPrompt 注入北京时间（问今天几号不能再说没联网）', () => {
+  const p = buildSystemPrompt(new Date('2026-11-11T00:35:00+08:00'))
+  assert.ok(p.includes('2026年11月11日'), p)
+  assert.ok(p.includes('星期三'), p)
+  assert.ok(p.includes('00:35'), p)
+  assert.ok(p.includes('北京时间'))
+  assert.ok(p.includes('不要说没有联网'))
 })
 
 test('RateLimiter 到点拒绝', () => {
