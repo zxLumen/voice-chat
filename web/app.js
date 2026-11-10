@@ -721,6 +721,40 @@ function restoreHistory() {
   setTimeout(scrollChat, 30)
 }
 
+/* ---------------- 装成 App（PWA / 主屏幕） ---------------- */
+
+const TIP_KEY = 'suikou.installTip.v1'
+
+function isStandalone() {
+  return window.navigator.standalone === true || !!window.matchMedia?.('(display-mode: standalone)').matches
+}
+
+function registerSw() {
+  if (!('serviceWorker' in navigator) || !window.isSecureContext) return
+  navigator.serviceWorker.register('/sw.js').catch(() => {})
+}
+
+// iPhone Safari 里没装到桌面时给一句提示；装好后（standalone）不再出现
+function maybeInstallTip() {
+  const tip = $('installTip')
+  if (!tip || isStandalone()) return
+  const ua = navigator.userAgent
+  const ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  const safari = /Safari\//.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(ua)
+  let dismissed = false
+  try {
+    dismissed = localStorage.getItem(TIP_KEY) === 'off'
+  } catch {}
+  if (!ios || !safari || dismissed) return
+  tip.hidden = false
+  $('btnTipClose').addEventListener('click', () => {
+    tip.hidden = true
+    try {
+      localStorage.setItem(TIP_KEY, 'off')
+    } catch {}
+  })
+}
+
 async function boot() {
   bindSettings()
 
@@ -783,6 +817,9 @@ async function boot() {
   }
   if (S.cfg?.tts?.enabled) $('hint').textContent = '也可以直接打字 · 录音只在本次识别，不保存'
   setPhase('idle', S.messages.length ? '接着说，或者直接打字' : '点一下，开始说话')
+
+  registerSw()
+  maybeInstallTip()
 }
 
 boot()

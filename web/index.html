@@ -6,11 +6,14 @@
     <meta name="theme-color" content="#07080d" />
     <meta name="description" content="随口 · 打开网页就能说话的大模型语音助手，手机浏览器直接用。" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="随口" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="format-detection" content="telephone=no" />
     <title>随口 · 语音助手</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body data-phase="boot">
@@ -26,6 +29,11 @@
           </button>
         </div>
       </header>
+
+      <div class="install-tip" id="installTip" hidden>
+        <span>当 App 用：Safari 分享 → 添加到主屏幕，确认「作为 Web App」是开的</span>
+        <button id="btnTipClose" type="button" aria-label="知道了">×</button>
+      </div>
 
       <main class="stage">
         <section class="orb-area" id="orbArea">

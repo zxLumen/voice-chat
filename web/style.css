@@ -493,6 +493,25 @@ body[data-phase="error"] .orb { animation: none; filter: grayscale(0.4); }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* ---------------- 装到桌面提示（iPhone Safari 未以 App 打开时） ---------------- */
+.install-tip {
+  flex: 0 0 auto;
+  margin: 0 14px 8px;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+  background: rgba(110, 231, 255, 0.09);
+  border: 1px solid rgba(110, 231, 255, 0.26);
+  border-radius: 12px;
+}
+.install-tip[hidden] { display: none; }
+.install-tip span { flex: 1; }
+.install-tip button { flex: 0 0 auto; font-size: 18px; line-height: 1; color: var(--fg-dim); padding: 0 2px; }
+
 @keyframes fade { from { opacity: 0; } }
 @keyframes slideUp { from { transform: translateY(30px); opacity: 0.6; } }
 

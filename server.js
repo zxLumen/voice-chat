@@ -60,6 +60,8 @@ const SECURITY_HEADERS = {
     "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self' https://zxlumen.cn",
 }
 
+const NO_CACHE = new Set(['index.html', 'sw.js', 'manifest.webmanifest'])
+
 function serveStatic(req, res, pathname) {
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
   if (!/^[a-zA-Z0-9._-]+$/.test(rel)) return text(res, 400, 'bad path')
@@ -71,7 +73,7 @@ function serveStatic(req, res, pathname) {
     res.writeHead(200, {
       'content-type': type,
       'content-length': buf.length,
-      'cache-control': rel === 'index.html' ? 'no-cache' : 'public, max-age=300',
+      'cache-control': NO_CACHE.has(rel) ? 'no-cache' : 'public, max-age=300',
       ...SECURITY_HEADERS,
     })
     res.end(buf)

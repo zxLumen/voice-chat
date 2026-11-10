@@ -153,6 +153,43 @@ test('首页与静态资源可访问，且带安全头', async () => {
   assert.match(js.headers.get('content-type') || '', /javascript/)
 })
 
+test('PWA：manifest 可装成独立 App（id/scope/standalone/图标齐全）', async () => {
+  const r = await fetch(base + '/manifest.webmanifest')
+  assert.equal(r.status, 200)
+  assert.match(r.headers.get('content-type') || '', /manifest\+json/)
+  assert.equal(r.headers.get('cache-control'), 'no-cache')
+  const m = await r.json()
+  assert.equal(m.id, '/')
+  assert.equal(m.scope, '/')
+  assert.equal(m.start_url, '/')
+  assert.equal(m.display, 'standalone')
+  const sizes = m.icons.map((i) => i.sizes)
+  for (const s of ['180x180', '192x192', '512x512']) assert.ok(sizes.includes(s), `缺 ${s}`)
+  assert.ok(m.icons.some((i) => i.purpose === 'maskable'))
+})
+
+test('PWA：iOS 桌面图标/meta 与 service worker 就绪', async () => {
+  const html = await (await fetch(base + '/')).text()
+  assert.match(html, /rel="apple-touch-icon"[^>]*sizes="180x180"[^>]*href="\/icon-180\.png"/)
+  assert.match(html, /name="apple-mobile-web-app-capable"[^>]*content="yes"/)
+  assert.match(html, /name="apple-mobile-web-app-title"/)
+  assert.match(html, /name="mobile-web-app-capable"/)
+  assert.match(html, /rel="manifest" href="\/manifest\.webmanifest"/)
+
+  const icon = await fetch(base + '/icon-180.png')
+  assert.equal(icon.status, 200)
+  assert.match(icon.headers.get('content-type') || '', /image\/png/)
+
+  const sw = await fetch(base + '/sw.js')
+  assert.equal(sw.status, 200)
+  assert.match(sw.headers.get('content-type') || '', /javascript/)
+  assert.equal(sw.headers.get('cache-control'), 'no-cache')
+  const body = await sw.text()
+  assert.match(body, /voice-shell/)
+  assert.match(body, /addEventListener\('fetch'/)
+  assert.match(body, /pathname\.startsWith\('\/api\/'\)/)
+})
+
 test('路径穿越被拒绝', async () => {
   const r = await fetch(`${base}/..%2fserver.js`)
   assert.ok([400, 403, 404].includes(r.status))
