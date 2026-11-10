@@ -14,6 +14,7 @@ let up
 let app
 let lastSpeech = null
 let speechHits = 0
+const failedOnce = new Set()
 
 const sse = (res, objs) => {
   res.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -58,6 +59,12 @@ before(async () => {
         speechHits++
         // 模拟上游 250ms 抖动，对冲逻辑才会真的发第二路
         setTimeout(() => {
+          if (lastSpeech?.input?.includes('重试') && !failedOnce.has(lastSpeech.input)) {
+            failedOnce.add(lastSpeech.input)
+            res.writeHead(500, { 'content-type': 'application/json' })
+            res.end('{"code":50507,"message":"Request failed: Unknown error."}')
+            return
+          }
           res.writeHead(200, { 'content-type': 'audio/mpeg' })
           res.end(Buffer.from('ID3fake-mp3'))
         }, 250)
@@ -328,6 +335,20 @@ test('首句对冲：hedge=true 会同时发两路合成，先回者胜', async 
     body: JSON.stringify({ text: '这是一句只在对冲用例里出现的独特句子', voice: 'anna', speed: 1, hedge: true }),
   })
   assert.equal(r.status, 200)
+  await new Promise((res) => setTimeout(res, 300))
+  assert.equal(speechHits - before, 2)
+})
+
+
+test('上游 5xx 自动重试一次（50507 这类抖动不该丢句）', async () => {
+  const before = speechHits
+  const r = await fetch(`${base}/api/tts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '这条会先失败一次再重试成功的独特句子', voice: 'anna', speed: 1 }),
+  })
+  assert.equal(r.status, 200)
+  assert.ok((await r.arrayBuffer()).byteLength > 4)
   await new Promise((res) => setTimeout(res, 300))
   assert.equal(speechHits - before, 2)
 })
