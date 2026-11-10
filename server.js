@@ -1,0 +1,230 @@
+import http from 'node:http'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  AI_TOKEN,
+  ASR_MODEL,
+  MAX_ASR_BYTES,
+  MAX_ASR_SECONDS,
+  MODEL,
+  PORT,
+  TTS_DAILY_CHARS,
+  TTS_MODE,
+  VERSION,
+  VOICES,
+} from './lib/env.js'
+import { asrReady, transcribe, warmupAsr } from './lib/asr.js'
+import { streamChat } from './lib/llm.js'
+import { synthesize, ttsEnabled } from './lib/tts.js'
+import { RateLimiter, clientIp, json, readBody, readJson, sseHead, sseSend, text } from './lib/util.js'
+
+const ROOT = path.dirname(fileURLToPath(import.meta.url))
+const WEB = path.join(ROOT, 'web')
+
+const limits = {
+  chat: new RateLimiter(40, 5 * 60_000),
+  asr: new RateLimiter(30, 5 * 60_000),
+  tts: new RateLimiter(120, 5 * 60_000),
+}
+
+const bjDay = () => new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10)
+const ttsBudget = { day: '', chars: 0 }
+function chargeTts(chars) {
+  const d = bjDay()
+  if (ttsBudget.day !== d) {
+    ttsBudget.day = d
+    ttsBudget.chars = 0
+  }
+  if (ttsBudget.chars + chars > TTS_DAILY_CHARS) return false
+  ttsBudget.chars += chars
+  return true
+}
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8',
+}
+
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'x-frame-options': 'SAMEORIGIN',
+  'permissions-policy': 'microphone=(self)',
+  'content-security-policy':
+    "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'",
+}
+
+function serveStatic(req, res, pathname) {
+  const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
+  if (!/^[a-zA-Z0-9._-]+$/.test(rel)) return text(res, 400, 'bad path')
+  const file = path.join(WEB, rel)
+  if (!file.startsWith(WEB + path.sep)) return text(res, 403, 'forbidden')
+  fs.readFile(file, (err, buf) => {
+    if (err) return text(res, 404, 'not found')
+    const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream'
+    res.writeHead(200, {
+      'content-type': type,
+      'content-length': buf.length,
+      'cache-control': rel === 'index.html' ? 'no-cache' : 'public, max-age=300',
+      ...SECURITY_HEADERS,
+    })
+    res.end(buf)
+  })
+}
+
+const config = {
+  version: VERSION,
+  model: MODEL,
+  asr: { enabled: asrReady(), maxSeconds: MAX_ASR_SECONDS, model: ASR_MODEL },
+  tts: { enabled: ttsEnabled(), mode: TTS_MODE, voices: VOICES, defaultVoice: VOICES[0].id },
+  limits: { chatPer5min: 40, asrPer5min: 30, ttsPer5min: 120 },
+}
+
+async function handleChat(req, res) {
+  const ip = clientIp(req)
+  if (!limits.chat.take(ip)) return json(res, 429, { error: '说话太快了，歇 5 分钟。' })
+
+  let body
+  try {
+    body = await readJson(req, 96 * 1024)
+  } catch {
+    return json(res, 400, { error: '请求体不是合法 JSON' })
+  }
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  if (!messages.length) return json(res, 400, { error: 'messages 不能为空' })
+  if (messages.filter((m) => m?.role === 'user').length > 40) {
+    return json(res, 400, { error: '对话太长了，开个新对话吧。' })
+  }
+
+  const ac = new AbortController()
+  res.on('close', () => ac.abort())
+
+  sseHead(res)
+  const heartbeat = setInterval(() => res.write(': ping\n\n'), 15_000)
+  try {
+    const { text: answer, usage } = await streamChat({
+      messages,
+      signal: ac.signal,
+      onDelta: (t) => sseSend(res, { t }),
+    })
+    clearInterval(heartbeat)
+    sseSend(res, { done: true, usage: usage ? { in: usage.prompt_tokens, out: usage.completion_tokens } : null, len: answer.length })
+    res.end()
+  } catch (e) {
+    clearInterval(heartbeat)
+    if (!ac.signal.aborted) {
+      sseSend(res, { error: e instanceof Error ? e.message : '对话失败' })
+    }
+    res.end()
+  }
+}
+
+async function handleAsr(req, res) {
+  const ip = clientIp(req)
+  if (!limits.asr.take(ip)) return json(res, 429, { error: '识别太频繁，歇一会儿。' })
+  if (!asrReady()) return json(res, 503, { error: '转写未配置' })
+
+  const type = String(req.headers['content-type'] || 'audio/webm')
+  if (!/^audio\/|^application\/octet-stream/.test(type)) {
+    return json(res, 415, { error: '只接受音频请求体' })
+  }
+  let buf
+  try {
+    buf = await readBody(req, MAX_ASR_BYTES)
+  } catch (e) {
+    return json(res, e.code === 413 ? 413 : 400, { error: e.code === 413 ? '录音太长了' : '读取音频失败' })
+  }
+  if (buf.length < 1200) return json(res, 400, { error: '录音太短了' })
+
+  try {
+    const r = await transcribe(buf, { contentType: type })
+    if (!r.text) return json(res, 200, { text: '', ms: r.ms })
+    if (r.seconds && r.seconds > MAX_ASR_SECONDS + 2) return json(res, 413, { error: '单次录音请控制在 60 秒内' })
+    return json(res, 200, r)
+  } catch (e) {
+    console.error('[asr]', e instanceof Error ? e.message : e)
+    return json(res, 502, { error: '没听清，再说一次？' })
+  }
+}
+
+async function handleTts(req, res) {
+  const ip = clientIp(req)
+  if (!limits.tts.take(ip)) return json(res, 429, { error: '合成太频繁' })
+  if (!ttsEnabled()) return json(res, 503, { error: 'TTS 未启用' })
+
+  let body
+  try {
+    body = await readJson(req, 8 * 1024)
+  } catch {
+    return json(res, 400, { error: '请求体不是合法 JSON' })
+  }
+  const chars = String(body.text || '').length
+  if (!chargeTts(chars)) return json(res, 429, { error: '今天说得有点多，明天再聊。' })
+  try {
+    const buf = await synthesize({ text: body.text, voice: body.voice, speed: body.speed })
+    res.writeHead(200, {
+      'content-type': 'audio/mpeg',
+      'content-length': buf.length,
+      'cache-control': 'private, max-age=3600',
+      ...SECURITY_HEADERS,
+    })
+    res.end(buf)
+  } catch (e) {
+    console.error('[tts]', e instanceof Error ? e.message : e)
+    json(res, 502, { error: '语音合成失败' })
+  }
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url || '/', 'http://localhost')
+  const p = url.pathname
+
+  try {
+    if (p === '/api/health') {
+      return json(res, 200, {
+        ok: true,
+        version: VERSION,
+        llm: Boolean(AI_TOKEN),
+        asr: asrReady(),
+        tts: ttsEnabled(),
+        ttsMode: TTS_MODE,
+        model: MODEL,
+        uptime: Math.round(process.uptime()),
+      })
+    }
+    if (p === '/api/config') return json(res, 200, config)
+    if (p === '/api/chat' && req.method === 'POST') return await handleChat(req, res)
+    if (p === '/api/asr' && req.method === 'POST') return await handleAsr(req, res)
+    if (p === '/api/tts' && req.method === 'POST') return await handleTts(req, res)
+    if (p.startsWith('/api/')) return json(res, 404, { error: 'not found' })
+    if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, p)
+    return text(res, 405, 'method not allowed')
+  } catch (e) {
+    console.error('[server]', e)
+    if (!res.headersSent) json(res, 500, { error: '服务开小差了' })
+    else res.end()
+  }
+})
+
+server.listen(PORT, () => {
+  console.log(`[suikou] listening :${PORT} v${VERSION} asr=${asrReady()} tts=${TTS_MODE} model=${MODEL}`)
+  // SenseVoice 冷启动很慢，启动时打一次静音预热（失败不影响服务）
+  warmupAsr()
+    .then((r) => console.log('[suikou] asr warmup', JSON.stringify(r)))
+    .catch((e) => console.error('[suikou] warmup failed', e))
+})
+
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    console.log(`[suikou] ${sig}, closing`)
+    server.close(() => process.exit(0))
+    setTimeout(() => process.exit(0), 3000)
+  })
+}

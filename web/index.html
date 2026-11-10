@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#07080d" />
+    <meta name="description" content="随口 · 打开网页就能说话的大模型语音助手，手机浏览器直接用。" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>随口 · 语音助手</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body data-phase="boot">
+    <div class="app">
+      <header class="topbar">
+        <div class="brand"><span class="brand-dot"></span><span>随口</span></div>
+        <div class="top-acts">
+          <button id="btnNew" class="icon-btn" type="button" aria-label="新对话" title="新对话">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button id="btnSettings" class="icon-btn" type="button" aria-label="设置" title="设置">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" /><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="stage">
+        <section class="orb-area" id="orbArea">
+          <div class="orb-wrap" id="orbWrap">
+            <span class="halo"></span>
+            <span class="ring r1"></span>
+            <span class="ring r2"></span>
+            <button class="orb" id="orb" type="button" aria-label="开始说话">
+              <span class="orb-sheen"></span>
+              <svg class="orb-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3.6a3.1 3.1 0 0 1 3.1 3.1v5a3.1 3.1 0 0 1-6.2 0v-5A3.1 3.1 0 0 1 12 3.6Z" />
+                <path d="M5.8 11.4a6.2 6.2 0 0 0 12.4 0M12 17.6V21M8.6 21h6.8" />
+              </svg>
+            </button>
+            <div class="bars" id="bars" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i>
+            </div>
+          </div>
+          <p class="status" id="status">点一下，开始说话</p>
+          <p class="hint" id="hint">也可以直接打字 · 录音只在本次识别，不保存</p>
+
+          <div class="chips" id="chips">
+            <button type="button">讲个冷笑话，三句话以内</button>
+            <button type="button">帮我想想今晚吃什么</button>
+            <button type="button">用一句话夸夸我</button>
+          </div>
+        </section>
+
+        <section class="chat" id="chat" aria-live="polite"></section>
+      </main>
+
+      <footer class="composer">
+        <form id="textForm" class="text-form" autocomplete="off">
+          <textarea id="textInput" rows="1" placeholder="说点什么…" enterkeyhint="send" maxlength="1200"></textarea>
+          <button id="btnSend" class="send-btn" type="submit" aria-label="发送">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" /></svg>
+          </button>
+        </form>
+        <p class="disclaimer">AI 也会说错话，重要信息请再核实。</p>
+      </footer>
+    </div>
+
+    <div class="sheet-mask" id="sheetMask" hidden></div>
+    <section class="sheet" id="sheet" hidden aria-label="设置">
+      <div class="sheet-head">
+        <strong>设置</strong>
+        <button id="btnCloseSheet" class="icon-btn" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="sheet-body">
+        <label class="row">
+          <span>回复语音</span>
+          <select id="selEngine">
+            <option value="server">服务端语音（推荐）</option>
+            <option value="browser">本机系统语音</option>
+            <option value="off">不朗读</option>
+          </select>
+        </label>
+        <label class="row" id="rowVoice">
+          <span>音色</span>
+          <select id="selVoice"></select>
+        </label>
+        <label class="row" id="rowSpeed">
+          <span>语速 <em id="speedVal">1.0×</em></span>
+          <input id="rngSpeed" type="range" min="0.8" max="1.2" step="0.05" value="1" />
+        </label>
+        <label class="row switch-row">
+          <span>说完自动发（静音 0.7 秒后）</span>
+          <input id="chkAuto" type="checkbox" checked />
+        </label>
+        <label class="row switch-row">
+          <span>文字输入也朗读回复</span>
+          <input id="chkSpeakText" type="checkbox" />
+        </label>
+        <label class="row switch-row">
+          <span>说完自动继续听<small>（建议戴耳机，避免回声）</small></span>
+          <input id="chkAutoListen" type="checkbox" />
+        </label>
+        <div class="sheet-notes">
+          <p>· 录音仅用于本次识别，转完即删，不落盘、不留存。</p>
+          <p>· 对话只存在这台设备的浏览器里，换设备/清缓存即消失。</p>
+          <p id="engineNote"></p>
+        </div>
+        <button id="btnClear" class="danger-btn" type="button">清空这台设备上的对话</button>
+      </div>
+    </section>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "suikou-voice-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "随口 · 手机浏览器可用的大模型语音聊天（零依赖 Node）",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "PORT=8795 node server.js",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
