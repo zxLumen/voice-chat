@@ -13,6 +13,7 @@ const APP_PORT = 18899
 let up
 let app
 let lastSpeech = null
+let speechHits = 0
 
 const sse = (res, objs) => {
   res.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -54,8 +55,12 @@ before(async () => {
         try {
           lastSpeech = JSON.parse(body)
         } catch {}
-        res.writeHead(200, { 'content-type': 'audio/mpeg' })
-        res.end(Buffer.from('ID3fake-mp3'))
+        speechHits++
+        // 模拟上游 250ms 抖动，对冲逻辑才会真的发第二路
+        setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'audio/mpeg' })
+          res.end(Buffer.from('ID3fake-mp3'))
+        }, 250)
       })
       return
     }
@@ -312,4 +317,17 @@ test('润色输出清洗与守卫', () => {
   assert.equal(acceptPolish('帮我讲个冷笑话三句话以内。', '帮我讲个冷笑话，三句话以内。'), true)
   assert.equal(acceptPolish('帮我讲个冷笑话。', '抱歉，作为一个 AI 我无法…'), false)
   assert.equal(acceptPolish('短句', '一句完全不相干而且很长很长很长的回答内容'), false)
+})
+
+
+test('首句对冲：hedge=true 会同时发两路合成，先回者胜', async () => {
+  const before = speechHits
+  const r = await fetch(`${base}/api/tts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '这是一句只在对冲用例里出现的独特句子', voice: 'anna', speed: 1, hedge: true }),
+  })
+  assert.equal(r.status, 200)
+  await new Promise((res) => setTimeout(res, 300))
+  assert.equal(speechHits - before, 2)
 })

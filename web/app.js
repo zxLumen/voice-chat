@@ -33,7 +33,7 @@ const S = {
   chatAbort: null,
   replySpoken: false,
   streamDone: false,
-  tts: { session: 0, queue: [], endAt: 0, pumping: false, sources: [], cache: new Map(), ac: null, gain: null },
+  tts: { session: 0, queue: [], endAt: 0, pumping: false, sources: [], cache: new Map(), ac: null, gain: null, count: 0 },
   asrBusy: false,
   asrQueue: [],
   empties: 0,
@@ -241,7 +241,9 @@ function enqueueSpeech(raw) {
   if (ttsEngine() === 'off') return
   const text = cleanForSpeech(raw)
   if (!text) return
-  S.tts.queue.push({ text, key: `${S.settings.voice}|${S.settings.speed}|${text}`, buf: null, p: null })
+  // 每轮前两句做对冲：上游抖动时首声/第二句不被拖慢（多花一次合成）
+  const hedge = S.tts.count++ < 2
+  S.tts.queue.push({ text, key: `${S.settings.voice}|${S.settings.speed}|${text}`, buf: null, p: null, hedge })
   dispatchTts()
   pumpSpeech()
 }
@@ -268,7 +270,7 @@ async function fetchTts(item, session) {
   const res = await fetch('/api/tts', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text: item.text, voice: S.settings.voice, speed: S.settings.speed }),
+    body: JSON.stringify({ text: item.text, voice: S.settings.voice, speed: S.settings.speed, hedge: item.hedge === true }),
   })
   if (!res.ok) throw new Error(`tts ${res.status}`)
   const ab = await res.arrayBuffer()
@@ -708,6 +710,7 @@ async function ask(text, spoken) {
   S.tAskAt = performance.now()
   S.tFirstAudioAt = 0
   S.streamDone = false
+  S.tts.count = 0
   S.replySpoken = spoken && ttsEngine() !== 'off'
   S.messages.push({ role: 'user', content: text })
   saveHistory()

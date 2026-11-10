@@ -201,11 +201,13 @@ async function handleTts(req, res) {
   } catch {
     return json(res, 400, { error: '请求体不是合法 JSON' })
   }
-  const chars = String(body.text || '').length
+  const hedge = body.hedge === true
+  // 对冲会真的发两次合成，额度按实际用量记
+  const chars = String(body.text || '').length * (hedge ? 2 : 1)
   if (!chargeTts(chars)) return json(res, 429, { error: '今天说得有点多，明天再聊。' })
   const t0 = Date.now()
   try {
-    const buf = await synthesize({ text: body.text, voice: body.voice, speed: body.speed })
+    const buf = await synthesize({ text: body.text, voice: body.voice, speed: body.speed, hedge })
     res.writeHead(200, {
       'content-type': 'audio/mpeg',
       'content-length': buf.length,
