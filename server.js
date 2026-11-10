@@ -215,10 +215,14 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[suikou] listening :${PORT} v${VERSION} asr=${asrReady()} tts=${TTS_MODE} model=${MODEL}`)
-  // SenseVoice 冷启动很慢，启动时打一次静音预热（失败不影响服务）
-  warmupAsr()
-    .then((r) => console.log('[suikou] asr warmup', JSON.stringify(r)))
-    .catch((e) => console.error('[suikou] warmup failed', e))
+  // SenseVoice 冷启动很慢（实测 14s+），启动时先预热，之后每 4 分钟打一次 0.4s 静音保温
+  const keepWarmMs = Number(process.env.VOICE_ASR_KEEPWARM_MS || 240_000)
+  const warm = () =>
+    warmupAsr()
+      .then((r) => console.log('[suikou] asr warmup', JSON.stringify(r)))
+      .catch((e) => console.error('[suikou] warmup failed', e))
+  warm()
+  if (keepWarmMs > 0) setInterval(warm, keepWarmMs).unref()
 })
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
