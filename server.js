@@ -27,7 +27,7 @@ const WEB = path.join(ROOT, 'web')
 
 const limits = {
   chat: new RateLimiter(40, 5 * 60_000),
-  asr: new RateLimiter(30, 5 * 60_000),
+  asr: new RateLimiter(60, 5 * 60_000),
   tts: new RateLimiter(300, 5 * 60_000),
 }
 
@@ -88,7 +88,7 @@ const config = {
   model: MODEL,
   asr: { enabled: asrReady(), maxSeconds: MAX_ASR_SECONDS, model: ASR_MODEL, polish: POLISH_ENABLED },
   tts: { enabled: ttsEnabled(), mode: TTS_MODE, voices: VOICES, defaultVoice: VOICES[0].id },
-  limits: { chatPer5min: 40, asrPer5min: 30, ttsPer5min: 300 },
+  limits: { chatPer5min: 40, asrPer5min: 60, ttsPer5min: 300 },
 }
 
 async function handleChat(req, res) {

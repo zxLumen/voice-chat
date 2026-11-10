@@ -59,7 +59,7 @@
 | POST | `/api/chat` | `{messages:[{role,content}]}`，SSE：`data:{"t":"增量"}` … `data:{"done":true}` |
 | POST | `/api/tts` | `{text,voice,speed}` → `audio/mpeg` |
 
-限流：对话 40 次/5 分钟/IP、转写 30 次/5 分钟/IP、合成 300 次/5 分钟/IP（免提会按句请求）；TTS 另有每日字数上限（默认 8 万，按北京日）。
+限流：对话 40 次/5 分钟/IP、转写 60 次/5 分钟/IP、合成 300 次/5 分钟/IP（免提会按句请求）；TTS 另有每日字数上限（默认 8 万，按北京日）。
 
 ## 本地跑
 
