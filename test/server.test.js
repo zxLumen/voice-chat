@@ -4,6 +4,7 @@ import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { cleanTranscript } from '../lib/asr.js'
 import { trimHistory, SYSTEM_PROMPT, buildSystemPrompt } from '../lib/llm.js'
+import { pauseAfterSpeech } from '../lib/text.js'
 import { RateLimiter, LruCache } from '../lib/util.js'
 import { intToChinese, normalizeForSpeech, splitForSpeech } from '../lib/text.js'
 import { acceptPolish, cleanPolishOutput, shouldPolish } from '../lib/polish.js'
@@ -239,6 +240,14 @@ test('buildSystemPrompt 注入北京时间（问今天几号不能再说没联�
   assert.ok(p.includes('00:35'), p)
   assert.ok(p.includes('北京时间'))
   assert.ok(p.includes('不要说没有联网'))
+})
+
+test('句尾停顿：句号 160ms / 逗号 90ms / 无标点 0', () => {
+  assert.equal(pauseAfterSpeech('好的。'), 160)
+  assert.equal(pauseAfterSpeech('好的！'), 160)
+  assert.equal(pauseAfterSpeech('好的，'), 90)
+  assert.equal(pauseAfterSpeech('好的'), 0)
+  assert.equal(pauseAfterSpeech(''), 0)
 })
 
 test('RateLimiter 到点拒绝', () => {

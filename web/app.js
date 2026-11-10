@@ -13,7 +13,7 @@ const MAX_HISTORY = 20
 
 const DEFAULTS = {
   engine: 'server',
-  voice: 'anna',
+  voice: 'diana',
   speed: 1,
   autoSend: true,
   speakText: false,
@@ -55,6 +55,11 @@ function loadSettings() {
     if (saved && typeof saved === 'object' && !('bargeIn' in saved)) {
       saved.autoListen = true
       saved.bargeIn = true
+    }
+    // v0.2.3 音色迁移：旧默认 anna → 新默认 diana（只迁一次；自己选过别的音色不动）
+    if (saved && typeof saved === 'object' && (!saved.sv || saved.sv < 2)) {
+      if (!saved.voice || saved.voice === 'anna') saved.voice = 'diana'
+      saved.sv = 2
     }
     return { ...DEFAULTS, ...saved }
   } catch {
@@ -189,6 +194,16 @@ function cleanForSpeech(t) {
 const HARD_END = '。！？!?；;\n…'
 const SOFT_END = '，,、：:'
 
+/** 句尾停顿：句号后 160ms、逗号后 90ms（0 停顿听起来像机关枪）。 */
+function pauseAfter(text) {
+  const s = String(text || '').trim()
+  if (!s) return 0
+  const c = s[s.length - 1]
+  if (HARD_END.includes(c)) return 0.16
+  if (SOFT_END.includes(c)) return 0.09
+  return 0
+}
+
 function splitSpeech(input, final = false, firstMax = 12, max = 30) {
   const out = []
   let rest = String(input || '')
@@ -243,7 +258,8 @@ function enqueueSpeech(raw) {
   if (!text) return
   // 每轮前两句做对冲：上游抖动时首声/第二句不被拖慢（多花一次合成）
   const hedge = S.tts.count++ < 2
-  S.tts.queue.push({ text, key: `${S.settings.voice}|${S.settings.speed}|${text}`, buf: null, p: null, hedge })
+  S.tts.queue.push({ text, key: `${S.settings.voice}|${S.settings.speed}|${text}`, buf: null, p: null, hedge,
+                     pause: pauseAfter(text) })
   dispatchTts()
   pumpSpeech()
 }
@@ -281,7 +297,7 @@ async function fetchTts(item, session) {
   return buf
 }
 
-function scheduleBuffer(buf, session) {
+function scheduleBuffer(buf, session, pause = 0) {
   const ac = ensureAC()
   const t = Math.max(ac.currentTime + 0.04, S.tts.endAt || 0)
   if (S.tFirstAudioAt === 0) {
@@ -298,7 +314,7 @@ function scheduleBuffer(buf, session) {
     S.tts.sources = S.tts.sources.filter((x) => x !== src)
   }
   src.start(t)
-  S.tts.endAt = t + buf.duration
+  S.tts.endAt = t + buf.duration + pause
   if (session === S.tts.session && S.phase !== 'speaking') setPhase('speaking', '')
 }
 
@@ -327,7 +343,7 @@ async function pumpSpeech() {
           continue
         }
         S.tts.queue.shift()
-        scheduleBuffer(buf, session)
+        scheduleBuffer(buf, session, item.pause || 0)
         dispatchTts()
         continue
       }

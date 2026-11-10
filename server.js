@@ -13,6 +13,7 @@ import {
   TTS_DAILY_CHARS,
   TTS_KEEPWARM_MS,
   TTS_MODE,
+  TTS_VOICE,
   VERSION,
   VOICES,
 } from './lib/env.js'
@@ -87,7 +88,7 @@ const config = {
   version: VERSION,
   model: MODEL,
   asr: { enabled: asrReady(), maxSeconds: MAX_ASR_SECONDS, model: ASR_MODEL, polish: POLISH_ENABLED },
-  tts: { enabled: ttsEnabled(), mode: TTS_MODE, voices: VOICES, defaultVoice: VOICES[0].id },
+  tts: { enabled: ttsEnabled(), mode: TTS_MODE, voices: VOICES, defaultVoice: TTS_VOICE },
   limits: { chatPer5min: 40, asrPer5min: 60, ttsPer5min: 300 },
 }
 
