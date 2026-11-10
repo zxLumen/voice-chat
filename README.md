@@ -21,7 +21,7 @@
   MediaRecorder(webm/opus 或 mp4/aac)
     → POST /api/asr（原始音频体，12MB 上限）
       → ffmpeg 16k 单声道 mp3
-      → AI 网关 /audio/transcriptions（SiliconFlow SenseVoice）
+      → AI 网关 /audio/transcriptions（SiliconFlow XingChenASR）
     → POST /api/chat（SSE）
       → AI 网关 /chat/completions（deepseek-v4.1-flash，reasoning_effort=none）
     → POST /api/tts（每句一次）
@@ -37,7 +37,7 @@
 
 | 环节 | 耗时 |
 | --- | --- |
-| 转写（TTS→ASR 回环） | 0.48 ~ 1.6s，平均约 1s |
+| 转写（网关，4s 语音，XingChenASR） | 0.49 ~ 0.85s |
 | 首个 token | 1.2 ~ 1.4s（deepseek-v4.1-flash） |
 | 首句合成 | 1.0 ~ 2.0s（CosyVoice2，随句长） |
 | **松手 → 第一声** | **约 3.5 ~ 4s** |

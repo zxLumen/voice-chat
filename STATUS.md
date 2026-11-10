@@ -15,7 +15,7 @@
 
 - 单元/接口测试 11/11 通过。
 - 假麦克风全链路（本地）：听 → 转写 0.48~1.6s → 首 token 1.2~1.4s → 首声 3.3s（ask 起算）。
-- 线上 `voice.zxlumen.cn` 实测：ASR 1.34s、首 token 1.73s、首声 3.23s（ask 起算），松手到第一声约 4s。
+- 线上 `voice.zxlumen.cn` 实测：ASR 0.5~0.85s（XingChenASR；先前 SenseVoice 抖动 4.5~16s，已换掉）、首 token 1.7s、首声 3.2s（ask 起算），松手到第一声约 3.5~4s。
 - ASR 模型冷启动一次可达 15s（线上遇到过一次 16.2s）；已加启动预热 + 每 4 分钟 0.4s 静音保温。
 - TTS 每日字数上限 8 万（北京日、进程内计数）。
 
@@ -41,7 +41,7 @@ docker logs --tail 50 voice
 - Caddy：`docker/caddy/sites/voice.caddy` → `voice:8795`，`import webapp`（应用栏可 iframe）。
 - DNS：DNSPod A `voice → 103.205.240.62`（RecordId 2447626899，TTL 600）。
 - 网关：应用令牌 `voice`（chat-default / deepseek-v4.1-flash / 50 万 token 日限 /
-  reasoning_effort=none）、`voice-asr`（provider-voice-asr = SiliconFlow SenseVoice，900 分钟/日）。
+  reasoning_effort=none）、`voice-asr`（provider-voice-asr = SiliconFlow XingChenASR，900 分钟/日）。
 - 密钥：`VOICE_TTS_KEY` 在 `/home/ubuntu/zxLumen-Blog/docker/.env`（0600），仅 TTS 用；
   ASR 已走网关，不再需要应用侧音频密钥。
 - 应用栏：`apps_config` 新增 `voice`（panel），图标 `docker/site-content/apps/voice.png`。

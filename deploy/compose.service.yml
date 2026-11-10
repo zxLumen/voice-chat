@@ -11,9 +11,9 @@ voice:
     # 对话 + 转写走主站 AI 网关（容器内网）
     ZX_AI_GATEWAY_URL: http://app:3000/api/ai/v1
     VOICE_AI_TOKEN: ${VOICE_AI_TOKEN:-}
-    # 转写令牌（绑定 SiliconFlow / SenseVoice，快）；缺省复用 AI_TOKEN
+    # 转写令牌（绑定 SiliconFlow / XingChenASR，快）；缺省复用 AI_TOKEN
     VOICE_ASR_TOKEN: ${VOICE_ASR_TOKEN:-}
-    VOICE_ASR_MODEL: ${VOICE_ASR_MODEL:-FunAudioLLM/SenseVoiceSmall}
+    VOICE_ASR_MODEL: ${VOICE_ASR_MODEL:-XingChenAGI/XingChenASR-V3.2}
     VOICE_MODEL: ${VOICE_MODEL:-deepseek-v4.1-flash}
     # TTS：direct = 直连 OpenAI 兼容 /audio/speech（SiliconFlow CosyVoice2）
     #      待主站网关加 /audio/speech 后改 gateway（密钥只留主站）
