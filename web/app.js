@@ -459,6 +459,7 @@ async function ask(text, spoken) {
   const t0 = performance.now()
   let tFirstToken = 0
   let tFirstAudio = 0
+  let spokeAny = false
 
   try {
     const res = await fetch('/api/chat', {
@@ -536,7 +537,7 @@ async function ask(text, spoken) {
 }
 
 const END_PUNCT = '。！？!?；;\n…'
-function splitSentences(input, final) {
+function splitSentences(input, final, first = false) {
   let out = []
   let rest = String(input || '')
   for (;;) {
@@ -552,6 +553,15 @@ function splitSentences(input, final) {
       rest = rest.slice(cut + 1)
       if (s) out.push(s)
       continue
+    }
+    // 首句优先出声：只要攒到 7 个字，就在第一个逗号处切，别等整句
+    if (first && rest.length >= 7) {
+      const idx = rest.search(/[，,、]/)
+      if (idx >= 4) {
+        out.push(rest.slice(0, idx + 1).trim())
+        rest = rest.slice(idx + 1)
+        continue
+      }
     }
     if (rest.length > 14) {
       const idx = Math.max(rest.lastIndexOf('，'), rest.lastIndexOf(','), rest.lastIndexOf('、'))

@@ -25,7 +25,7 @@
     → POST /api/chat（SSE）
       → AI 网关 /chat/completions（deepseek-v4.1-flash，reasoning_effort=none）
     → POST /api/tts（每句一次）
-      → OpenAI 兼容 /audio/speech（SiliconFlow CosyVoice2）
+      → AI 网关 /audio/speech（SiliconFlow CosyVoice2，密钥只在主站）
     → Web Audio 排队播放（可随时 stop）
 ```
 
@@ -39,8 +39,8 @@
 | --- | --- |
 | 转写（网关，4s 语音，XingChenASR） | 0.49 ~ 0.85s |
 | 首个 token | 1.2 ~ 1.4s（deepseek-v4.1-flash） |
-| 首句合成 | 1.0 ~ 2.0s（CosyVoice2，随句长） |
-| **松手 → 第一声** | **约 3.5 ~ 4s** |
+| 首句合成 | 0.8 ~ 1.6s（CosyVoice2，随句长；首句在第一个逗号处就切） |
+| **松手 → 第一声** | **约 2.5 ~ 3.5s** |
 
 没做流式 ASR / 流式 TTS，所以还追不上豆包的 1s 级；后续接网关 `/audio/speech` 流式再压。
 
@@ -90,5 +90,6 @@ docker compose up -d voice && docker compose exec caddy caddy reload -c /etc/cad
 - 没有流式 ASR：必须等录音结束才知道说了什么。
 - 语音合成按句整段返回，不是边生成边播。
 - 实时信息（天气/股价/新闻）没有联网工具，模型会直说不知道。
-- 服务端 TTS 目前 **直连** SiliconFlow；主站网关只有 `/audio/transcriptions`，没有 `/audio/speech`。加上之后把 `VOICE_TTS_MODE=gateway` 即可把密钥收回主站。
+- TTS 已走主站网关 `/audio/speech`（`VOICE_TTS_MODE=gateway`），应用侧不再持有 SiliconFlow 密钥；
+  直连模式只留给本地调试。
 - 没有服务端会话存储：换设备/清缓存，对话就没了（有意为之）。
