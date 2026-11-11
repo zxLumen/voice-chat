@@ -116,6 +116,56 @@ after(() => {
 
 const base = `http://127.0.0.1:${APP_PORT}`
 
+/** 生成一段合法 WAV（静音），用于走完 ffmpeg → 上游转写链路。 */
+function wavBytes(seconds = 1, rate = 16000) {
+  const samples = Math.floor(rate * seconds)
+  const data = Buffer.alloc(samples * 2)
+  const buf = Buffer.alloc(44 + data.length)
+  buf.write('RIFF', 0)
+  buf.writeUInt32LE(36 + data.length, 4)
+  buf.write('WAVE', 8)
+  buf.write('fmt ', 12)
+  buf.writeUInt32LE(16, 16)
+  buf.writeUInt16LE(1, 20)
+  buf.writeUInt16LE(1, 22)
+  buf.writeUInt32LE(rate, 24)
+  buf.writeUInt32LE(rate * 2, 28)
+  buf.writeUInt16LE(2, 32)
+  buf.writeUInt16LE(16, 34)
+  buf.write('data', 36)
+  buf.writeUInt32LE(data.length, 40)
+  data.copy(buf, 44)
+  return buf
+}
+
+function asrReq(agent, { xff, cockpit = false, body = Buffer.alloc(1100), type = 'audio/webm' } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = {
+      'content-type': type,
+      'content-length': String(body.length),
+      'x-forwarded-for': xff,
+    }
+    if (cockpit) headers['x-voice-client'] = 'cockpit'
+    const r = http.request(
+      { host: '127.0.0.1', port: APP_PORT, path: '/api/asr', method: 'POST', agent, headers },
+      (res) => {
+        const chunks = []
+        res.on('data', (c) => chunks.push(c))
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode,
+            type: res.headers['content-type'] || '',
+            body: Buffer.concat(chunks).toString('utf8'),
+          }),
+        )
+      },
+    )
+    r.on('error', reject)
+    r.end(body)
+  })
+}
+
+
 test('health 报告 llm/asr/tts 就绪', async () => {
   const r = await fetch(`${base}/api/health`)
   const j = await r.json()
@@ -292,6 +342,55 @@ test('config 暴露转写模型与上下文润色开关', async () => {
   const j = await r.json()
   assert.ok(j.asr.model, '应报告转写模型')
   assert.equal(j.asr.polish, true)
+})
+
+test('config limits：chat 40 / asr 60 / cockpit asr 300 / tts 300', async () => {
+  const r = await fetch(`${base}/api/config`)
+  const j = await r.json()
+  assert.equal(j.limits.chatPer5min, 40)
+  assert.equal(j.limits.asrPer5min, 60)
+  assert.equal(j.limits.asrCockpitPer5min, 300)
+  assert.equal(j.limits.ttsPer5min, 300)
+})
+
+test('ASR 配额：匿名第 61 次 429，带 cockpit 头仍可继续', async () => {
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  const xff = '203.0.113.240'
+  try {
+    for (let i = 1; i <= 60; i++) {
+      const r = await asrReq(agent, { xff })
+      assert.equal(r.status, 400, `第 ${i} 次应因录音太短返回 400`)
+    }
+    const limited = await asrReq(agent, { xff })
+    assert.equal(limited.status, 429)
+    assert.match(limited.type, /application\/json/)
+    assert.match(limited.body, /识别太频繁/)
+
+    // 同一来源 IP 带 cockpit 内部头：走独立 300 次额度，不应被匿名桶的 60 次拖累。
+    // 宿主机没装 ffmpeg 时转写会 502，但状态不能是 429（说明配额已分开）。
+    const ok = await asrReq(agent, { xff, cockpit: true, body: wavBytes(1), type: 'audio/wav' })
+    assert.notEqual(ok.status, 429, ok.body)
+    assert.match(ok.type, /application\/json/)
+  } finally {
+    agent.destroy()
+  }
+})
+
+test('ASR 429 早退前 drain：同一条 keep-alive 连接不残留 body / 不返回 400 HTML', async () => {
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  const xff = '203.0.113.241'
+  try {
+    for (let i = 1; i <= 60; i++) await asrReq(agent, { xff })
+    const r61 = await asrReq(agent, { xff })
+    assert.equal(r61.status, 429)
+    const r62 = await asrReq(agent, { xff })
+    assert.equal(r62.status, 429, `第 62 条应仍是 JSON 429，实际 ${r62.status} ${r62.body.slice(0, 80)}`)
+    assert.match(r62.type, /application\/json/)
+    assert.equal(/<html/i.test(r62.body), false)
+    assert.match(r62.body, /识别太频繁/)
+  } finally {
+    agent.destroy()
+  }
 })
 
 test('朗读前清掉 Markdown/链接/表情', () => {

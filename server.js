@@ -21,7 +21,7 @@ import { asrReady, transcribe, warmupAsr } from './lib/asr.js'
 import { streamChat } from './lib/llm.js'
 import { polishStats, polishTranscript } from './lib/polish.js'
 import { synthesize, ttsEnabled, ttsStats, warmupTts } from './lib/tts.js'
-import { RateLimiter, clientIp, json, readBody, readJson, sseHead, sseSend, text } from './lib/util.js'
+import { RateLimiter, clientIp, drainBody, json, readBody, readJson, sseHead, sseSend, text } from './lib/util.js'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
 const WEB = path.join(ROOT, 'web')
@@ -29,6 +29,8 @@ const WEB = path.join(ROOT, 'web')
 const limits = {
   chat: new RateLimiter(40, 5 * 60_000),
   asr: new RateLimiter(60, 5 * 60_000),
+  // cockpit 内部代理（X-Voice-Client: cockpit）单独一档，避免驾驶舱连续说话挤占匿名额度
+  asrCockpit: new RateLimiter(300, 5 * 60_000),
   tts: new RateLimiter(300, 5 * 60_000),
 }
 
@@ -89,12 +91,15 @@ const config = {
   model: MODEL,
   asr: { enabled: asrReady(), maxSeconds: MAX_ASR_SECONDS, model: ASR_MODEL, polish: POLISH_ENABLED },
   tts: { enabled: ttsEnabled(), mode: TTS_MODE, voices: VOICES, defaultVoice: TTS_VOICE },
-  limits: { chatPer5min: 40, asrPer5min: 60, ttsPer5min: 300 },
+  limits: { chatPer5min: 40, asrPer5min: 60, asrCockpitPer5min: 300, ttsPer5min: 300 },
 }
 
 async function handleChat(req, res) {
   const ip = clientIp(req)
-  if (!limits.chat.take(ip)) return json(res, 429, { error: '说话太快了，歇 5 分钟。' })
+  if (!limits.chat.take(ip)) {
+    await drainBody(req)
+    return json(res, 429, { error: '说话太快了，歇 5 分钟。' })
+  }
 
   let body
   try {
@@ -149,11 +154,20 @@ function readCtx(req) {
 
 async function handleAsr(req, res) {
   const ip = clientIp(req)
-  if (!limits.asr.take(ip)) return json(res, 429, { error: '识别太频繁，歇一会儿。' })
-  if (!asrReady()) return json(res, 503, { error: '转写未配置' })
+  const fromCockpit = String(req.headers['x-voice-client'] || '').trim().toLowerCase() === 'cockpit'
+  const limiter = fromCockpit ? limits.asrCockpit : limits.asr
+  if (!limiter.take(ip)) {
+    await drainBody(req, MAX_ASR_BYTES)
+    return json(res, 429, { error: '识别太频繁，歇一会儿。' })
+  }
+  if (!asrReady()) {
+    await drainBody(req, MAX_ASR_BYTES)
+    return json(res, 503, { error: '转写未配置' })
+  }
 
   const type = String(req.headers['content-type'] || 'audio/webm')
   if (!/^audio\/|^application\/octet-stream/.test(type)) {
+    await drainBody(req, MAX_ASR_BYTES)
     return json(res, 415, { error: '只接受音频请求体' })
   }
   let buf
@@ -193,7 +207,10 @@ async function handleAsr(req, res) {
 
 async function handleTts(req, res) {
   const ip = clientIp(req)
-  if (!limits.tts.take(ip)) return json(res, 429, { error: '合成太频繁' })
+  if (!limits.tts.take(ip)) {
+    await drainBody(req)
+    return json(res, 429, { error: '合成太频繁' })
+  }
   if (!ttsEnabled()) return json(res, 503, { error: 'TTS 未启用' })
 
   let body
